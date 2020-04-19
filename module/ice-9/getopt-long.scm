@@ -1,5 +1,8 @@
-;;; Copyright (C) 1998, 2001, 2006, 2009, 2011 Free Software Foundation, Inc.
-;;;
+;;;; getopt-long.scm --- long options processing   -*- scheme -*-
+;;;;
+;;;; Copyright (C) 1998, 2001, 2006, 2009, 2011, 2020
+;;;;                                            Free Software Foundation, Inc.
+;;;;
 ;;;; This library is free software; you can redistribute it and/or
 ;;;; modify it under the terms of the GNU Lesser General Public
 ;;;; License as published by the Free Software Foundation; either
@@ -12,54 +15,59 @@
 ;;;; 
 ;;;; You should have received a copy of the GNU Lesser General Public
 ;;;; License along with this library; if not, write to the Free Software
-;;;; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+;;;; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+;;;; 02110-1301 USA
 
-;;; Author: Russ McManus (rewritten by Thien-Thi Nguyen)
+;;; Author: Russ McManus
+;;;         Rewritten by Thien-Thi Nguyen
+;;;         Rewritten by Dale Mellor 2020-04-14
 
 ;;; Commentary:
 
 ;;; This module implements some complex command line option parsing, in
-;;; the spirit of the GNU C library function `getopt_long'.  Both long
+;;; the spirit of the GNU C library function ‘getopt_long’.  Both long
 ;;; and short options are supported.
 ;;;
 ;;; The theory is that people should be able to constrain the set of
-;;; options they want to process using a grammar, rather than some arbitrary
-;;; structure.  The grammar makes the option descriptions easy to read.
+;;; options they want to process using a grammar, rather than some ad
+;;; hoc procedure.  The grammar makes the option descriptions easy to
+;;; read.
 ;;;
-;;; `getopt-long' is a procedure for parsing command-line arguments in a
-;;; manner consistent with other GNU programs.  `option-ref' is a procedure
-;;; that facilitates processing of the `getopt-long' return value.
+;;; ‘getopt-long’ is a procedure for parsing command-line arguments in a
+;;; manner consistent with other GNU programs.  ‘option-ref’ is a procedure
+;;; that facilitates processing of the ‘getopt-long’ return value.
 
 ;;; (getopt-long ARGS GRAMMAR)
 ;;; Parse the arguments ARGS according to the argument list grammar GRAMMAR.
 ;;;
 ;;; ARGS should be a list of strings.  Its first element should be the
-;;; name of the program; subsequent elements should be the arguments
+;;; name of the program, and subsequent elements should be the arguments
 ;;; that were passed to the program on the command line.  The
-;;; `program-arguments' procedure returns a list of this form.
+;;; ‘program-arguments’ procedure returns a list of this form.
 ;;;
 ;;; GRAMMAR is a list of the form:
 ;;; ((OPTION (PROPERTY VALUE) ...) ...)
 ;;;
-;;; Each OPTION should be a symbol.  `getopt-long' will accept a
-;;; command-line option named `--OPTION'.
+;;; Each OPTION should be a symbol.  ‘getopt-long’ will accept a
+;;; command-line option named ‘--OPTION’.
 ;;; Each option can have the following (PROPERTY VALUE) pairs:
 ;;;
-;;;   (single-char CHAR) --- Accept `-CHAR' as a single-character
-;;;		equivalent to `--OPTION'.  This is how to specify traditional
+;;;   (single-char CHAR) --- Accept ‘-CHAR’ as a single-character
+;;;		equivalent to ‘--OPTION’.  This is how to specify traditional
 ;;;		Unix-style flags.
 ;;;   (required? BOOL) --- If BOOL is true, the option is required.
 ;;;		getopt-long will raise an error if it is not found in ARGS.
 ;;;   (value BOOL) --- If BOOL is #t, the option accepts a value; if
 ;;;		it is #f, it does not; and if it is the symbol
-;;;		`optional', the option may appear in ARGS with or
+;;;		‘optional’, the option may appear in ARGS with or
 ;;;		without a value.
 ;;;   (predicate FUNC) --- If the option accepts a value (i.e. you
-;;;		specified `(value #t)' for this option), then getopt
-;;;		will apply FUNC to the value, and throw an exception
-;;;		if it returns #f.  FUNC should be a procedure which
-;;;		accepts a string and returns a boolean value; you may
-;;;		need to use quasiquotes to get it into GRAMMAR.
+;;;		specified ‘(value #t)’ or ‘(value 'optional)’ for this
+;;;		option), then getopt will apply FUNC to the value, and
+;;;		will not take the value if it returns #f.  FUNC should
+;;;		be a procedure which accepts a string and returns a
+;;;		boolean value; you may need to use quasiquotes to get it
+;;;		into GRAMMAR.
 ;;;
 ;;; The (PROPERTY VALUE) pairs may occur in any order, but each
 ;;; property may occur only once.  By default, options do not have
@@ -79,16 +87,22 @@
 ;;;                                         for "blimps" and "catalexis")
 ;;;    ("-ab" "bang" "-c" "couth")         (same)
 ;;;    ("-ac" "couth" "-b" "bang")         (same)
-;;;    ("-abc" "couth" "bang")             (an error, since `-b' is not the
-;;;                                         last option in its combination)
 ;;;
-;;; If an option's value is optional, then `getopt-long' decides
-;;; whether it has a value by looking at what follows it in ARGS.  If
-;;; the next element is does not appear to be an option itself, then
-;;; that element is the option's value.
+;;; If an option's value is optional, then ‘getopt-long’ decides whether
+;;; it has a value by looking at what follows it in ARGS.  If the next
+;;; element does not appear to be an option itself, and passes a
+;;; predicate if given, then that element is taken to be the option's
+;;; value.  Note that predicate functions are invaluable in this respect
+;;; for differentiating options and option values, and in the case of
+;;; options with optional values, PREDICATES REALLY SHOULD BE GIVEN.  If
+;;; an option is supposed to take a numerical value, then
+;;; ‘string->number’ can be used as the predicate; this will also allow
+;;; negative values to be used, which would ordinarily be regarded as
+;;; bad options causing the module, and the application consuming it, to
+;;; bail out with an immediate exit to the operating system.
 ;;;
 ;;; The value of a long option can appear as the next element in ARGS,
-;;; or it can follow the option name, separated by an `=' character.
+;;; or it can follow the option name, separated by an ‘=’ character.
 ;;; Thus, using the same grammar as above, the following argument lists
 ;;; are equivalent:
 ;;;   ("--apples" "Braeburn" "--blimps" "Goodyear")
@@ -99,27 +113,30 @@
 ;;; subsequent arguments are returned as ordinary arguments, even if
 ;;; they resemble options.  So, in the argument list:
 ;;;         ("--apples" "Granny Smith" "--" "--blimp" "Goodyear")
-;;; `getopt-long' will recognize the `apples' option as having the
-;;; value "Granny Smith", but it will not recognize the `blimp'
-;;; option; it will return the strings "--blimp" and "Goodyear" as
-;;; ordinary argument strings.
+;;; ‘getopt-long’ will recognize the ‘apples’ option as having the value
+;;; "Granny Smith", but it will not recognize the ‘blimp’ option; it
+;;; will return the strings "--blimp" and "Goodyear" as ordinary
+;;; argument strings.  The first "--" argument itself will *not* appear
+;;; in the ordinary arguments list, although the occurrence of
+;;; subsequent ones will.
 ;;;
-;;; The `getopt-long' function returns the parsed argument list as an
+;;; The ‘getopt-long’ function returns the parsed argument list as an
 ;;; assocation list, mapping option names --- the symbols from GRAMMAR
 ;;; --- onto their values, or #t if the option does not accept a value.
 ;;; Unused options do not appear in the alist.
 ;;;
-;;; All arguments that are not the value of any option are returned
-;;; as a list, associated with the empty list.
+;;; All arguments that are not the value of any option are returned as a
+;;; list, associated with the empty list in the above returned
+;;; association.
 ;;;
-;;; `getopt-long' throws an exception if:
+;;; ‘getopt-long’ throws an exception if:
 ;;; - it finds an unrecognized property in GRAMMAR
-;;; - the value of the `single-char' property is not a character
+;;; - the value of the ‘single-char’ property is not a character
 ;;; - it finds an unrecognized option in ARGS
 ;;; - a required option is omitted
 ;;; - an option that requires an argument doesn't get one
 ;;; - an option that doesn't accept an argument does get one (this can
-;;;   only happen using the long option `--opt=value' syntax)
+;;;   only happen using the long option ‘--opt=value’ syntax)
 ;;; - an option predicate fails
 ;;;
 ;;; So, for example:
@@ -147,9 +164,10 @@
 
 ;;; (option-ref OPTIONS KEY DEFAULT)
 ;;; Return value in alist OPTIONS using KEY, a symbol; or DEFAULT if not
-;;; found.  The value is either a string or `#t'.
+;;; found.  The return is either a string or ‘#t’, or whatever DEFAULT
+;;; is.
 ;;;
-;;; For example, using the `getopt-long' return value from above:
+;;; For example, using the ‘getopt-long’ return value from above:
 ;;;
 ;;; (option-ref (getopt-long ...) 'x-includes 42) => "/usr/include"
 ;;; (option-ref (getopt-long ...) 'not-a-key! 31) => 31
@@ -447,7 +465,7 @@
             (return  (append (reverse processed) args)))
         ;else
           (loop  (list (cdr args)  (cons A processed))))))))))
-         
+
 
 
 ;;  Check that all the rules inherent in the /specs/ are fulfilled by
@@ -523,7 +541,10 @@
 
 (define* (getopt-long program-arguments option-desc-list
                       #:key stop-at-first-non-option)
-  "Process options, handling both long and short options, similar to
+  "- Scheme Procedure: getopt-long PROGRAM-ARGUMENTS OPTION-DESC-LIST
+                                 [#:stop-at-first-non-option]
+
+Process options, handling both long and short options, similar to
 the glibc function 'getopt_long'.  PROGRAM-ARGUMENTS should be a value
 similar to what (program-arguments) returns.  OPTION-DESC-LIST is a
 list of option descriptions.  Each option description must satisfy the
@@ -552,7 +573,8 @@ or option values.
     By default, options are not required, and option values are not
 required.  By default, single character equivalents are not supported;
 if you want to allow the user to use single character options, you need
-to add a `single-char' clause to the option description."
+to add a ‘single-char’ clause to the option description."
+
   (with-fluids ((%program-name (car program-arguments)))
     (let* ((specs   (map parse-option-spec option-desc-list))
            (options  (extract-options
@@ -566,8 +588,11 @@ to add a `single-char' clause to the option description."
 
 
 (define (option-ref options key default)
-  "Return value in alist OPTIONS using KEY, a symbol; or DEFAULT if not found.
-The value is either a string or `#t'."
+  "- Scheme Procedure: option-ref OPTIONS KEY DEFAULT
+      Return value in alist OPTIONS (as returned from getopt-long),
+      using KEY, a symbol; or DEFAULT if not found.  The value is either
+      a string or ‘#t’, or whatever DEFAULT is."
   (or (assq-ref options key) default))
+
 
 ;;; getopt-long.scm ends here
