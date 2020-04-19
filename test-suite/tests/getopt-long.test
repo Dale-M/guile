@@ -1,7 +1,6 @@
 ;;;; getopt-long.test --- long options processing -*- scheme -*-
-;;;; Thien-Thi Nguyen <ttn@gnu.org> --- August 2001
 ;;;;
-;;;; 	Copyright (C) 2001, 2006, 2011 Free Software Foundation, Inc.
+;;;;	Copyright (C) 2001, 2006, 2011 Free Software Foundation, Inc.
 ;;;;
 ;;;; This library is free software; you can redistribute it and/or
 ;;;; modify it under the terms of the GNU Lesser General Public
@@ -16,6 +15,10 @@
 ;;;; You should have received a copy of the GNU Lesser General Public
 ;;;; License along with this library; if not, write to the Free Software
 ;;;; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+
+;;; Author:  Thien-Thi Nguyen <ttn@gnu.org> --- August 2001
+;;;          Dale Mellor <> --- April 2020
+
 
 (use-modules (test-suite lib)
              (ice-9 getopt-long)
@@ -48,6 +51,31 @@
 (deferr option-does-not-support-arg "option does not support argument")
 (deferr option-must-be-specified    "option must be specified")
 (deferr option-must-have-arg        "option must be specified with argument")
+
+
+
+(define  (symbol/>string a)
+  (if (symbol? a) (symbol->string a) ""))
+
+(define (output-sort out)
+  (sort out (lambda (a b) (string<? (symbol/>string (car a))
+                                    (symbol/>string (car b))))))
+
+(define*  (A-TEST  args  option-specs  expectation
+                   #:key  stop-at-first-non-option)
+  (let ((answer
+            (output-sort
+               (getopt-long
+                   (cons "foo" (string-split  args  #\space))
+                   option-specs
+                   #:stop-at-first-non-option  stop-at-first-non-option))))
+    (cond ((equal?  answer  (output-sort expectation))  #t)
+          (else  (format (current-output-port)
+                         "Test result was \n‘~s’ --VS-- \n‘~s’.\n"
+                         answer (output-sort expectation))
+                 #f))))
+
+
 
 (with-test-prefix "exported procs"
   (pass-if "`option-ref' defined"  (defined? 'option-ref))
@@ -92,33 +120,39 @@
 
 (with-test-prefix "value optional"
 
-  (define (test3 . args)
-    (getopt-long args '((foo (value optional) (single-char #\f))
-                        (bar))))
+  (define (test args expect)
+    (A-TEST  args
+             '((foo (value optional) (single-char #\f))
+               (bar))
+             expect))
 
-  (pass-if "long option `foo' w/ arg, long option `bar'"
-           (equal? (test3 "prg" "--foo" "fooval" "--bar")
-                   '((()) (bar . #t) (foo . "fooval"))))
+  (pass-if "long option ‘foo’ w/ arg, long option ‘bar’"
+           (test "--foo fooval --bar"
+                 '((()) (bar . #t) (foo . "fooval"))))
 
-  (pass-if "short option `foo' w/ arg, long option `bar'"
-           (equal? (test3 "prg" "-f" "fooval" "--bar")
-                   '((()) (bar . #t) (foo . "fooval"))))
+  (pass-if "short option ‘foo’ w/ arg, long option ‘bar’"
+           (test "-f fooval --bar"
+                 '((()) (bar . #t) (foo . "fooval"))))
 
-  (pass-if "short option `foo', long option `bar', no args"
-           (equal? (test3 "prg" "-f" "--bar")
-                   '((()) (bar . #t) (foo . #t))))
+  (pass-if "short option ‘foo’, long option ‘bar’, no args"
+           (test "-f --bar"
+                 '((()) (bar . #t) (foo . #t))))
 
-  (pass-if "long option `foo', long option `bar', no args"
-           (equal? (test3 "prg" "--foo" "--bar")
-                   '((()) (bar . #t) (foo . #t))))
+  (pass-if "long option ‘foo’, long option ‘bar’, no args"
+           (test "--foo --bar"
+                 '((()) (bar . #t) (foo . #t))))
 
-  (pass-if "long option `bar', short option `foo', no args"
-           (equal? (test3 "prg" "--bar" "-f")
-                   '((()) (foo . #t) (bar . #t))))
+  (pass-if "long option ‘bar’, short option ‘foo’, no args"
+           (test "--bar -f"
+                 '((()) (foo . #t) (bar . #t))))
 
-  (pass-if "long option `bar', long option `foo', no args"
-           (equal? (test3 "prg" "--bar" "--foo")
-                   '((()) (foo . #t) (bar . #t))))
+  (pass-if "long option ‘bar’, long option ‘foo’, no args"
+           (test "--bar --foo"
+                 '((()) (foo . #t) (bar . #t))))
+
+  (pass-if "--="
+           (test "--="
+                 '((() "--="))))
 
   )
 
@@ -227,11 +261,12 @@
 
 (with-test-prefix "apples-blimps-catalexis example"
 
-  (define (test8 . args)
-    (equal? (sort (getopt-long (cons "foo" args)
-                               '((apples    (single-char #\a))
+  (define  spec '((apples    (single-char #\a))
                                  (blimps    (single-char #\b) (value #t))
                                  (catalexis (single-char #\c) (value #t))))
+
+  (define (test8 . args)
+    (equal? (sort (getopt-long (cons "foo" args) spec)
                   (lambda (a b)
                     (cond ((null? (car a)) #t)
                           ((null? (car b)) #f)
@@ -299,4 +334,131 @@
 
   )
 
+
+(with-test-prefix "stop at end-of-options marker"
+
+  (define*  (test  args  expectation  #:key stop-at-first-non-option)
+    (A-TEST  args
+             '((abby) (ben) (charles))
+             expectation
+             #:stop-at-first-non-option stop-at-first-non-option))
+
+  (pass-if "stop at start"  (test "-- --abby" '((() "--abby"))))
+
+  (pass-if "stop in middle"  (test "--abby dave -- --ben"
+                                   '((() "dave" "--ben")  (abby . #t))))
+
+  (pass-if "stop at end"  (test "--abby dave --ben --"
+                                '((() "dave") (abby . #t) (ben . #t))))
+
+  (pass-if "marker before first non-option"
+           (test "--abby -- --ben dave --charles"
+                 '((() "--ben" "dave" "--charles") (abby . #t))     
+                 #:stop-at-first-non-option #t))
+
+  (pass-if "double end marker"
+           (test "--abby -- -- --ben"
+                 '((() "--" "--ben") (abby . #t))))
+
+  (pass-if "separated double end markers"
+           (test "--abby dave -- --ben -- --charles"
+                 '((() "dave" "--ben" "--" "--charles")
+                   (abby . #t))))
+  )
+
+
+(with-test-prefix "negative numbers for option values"
+
+   (define  (test  args  expectation)
+     (A-TEST  args
+              `((arthur (single-char #\a) (value optional)
+                        (predicate ,string->number))
+                (beth (single-char #\b) (value #t)
+                      (predicate ,string->number))
+                (charles (single-char #\c) (value optional))
+                (dave (single-char #\d) (value #t)))
+              expectation))
+
+   (pass-if  "predicated --optional=-1"
+             (test  "--arthur=-1"  '((()) (arthur . "-1"))))
+
+   (pass-if  "predicated -o-1"
+             (test  "-a-1"  '((()) (arthur . "-1"))))
+
+   (pass-if  "predicated --optional -1"
+             (test  "--arthur -1"  '((()) (arthur . "-1"))))
+
+   (pass-if  "predicated -o -1"
+             (test  "-a -1"  '((()) (arthur . "-1"))))
+
+   (pass-if  "predicated --mandatory=-1"
+             (test  "--beth=-1"   '((()) (beth . "-1"))))
+
+   (pass-if  "predicated -m-1"
+             (test  "-b-1"   '((()) (beth . "-1"))))
+
+   (pass-if  "predicated --mandatory -1"
+             (test  "--beth -1"   '((()) (beth . "-1"))))
+
+   (pass-if  "predicated -m -1"
+             (test  "-b -1"   '((()) (beth . "-1"))))
+   
+   (pass-if  "non-predicated --optional=-1"
+             (test  "--charles=-1"  '((()) (charles . "-1"))))
+
+   (pass-if  "non-predicated -o-1"
+             (test  "-c-1"  '((()) (charles . "-1"))))
+
+   (pass-if  "non-predicated --mandatory=-1"
+             (test  "--dave=-1"   '((()) (dave . "-1"))))
+
+   (pass-if  "non-predicated -m-1"
+             (test  "-d-1"   '((()) (dave . "-1"))))
+
+   (pass-if  "non-predicated --mandatory -1"
+             (test  "--dave -1"   '((()) (dave . "-1"))))
+
+   (pass-if  "non-predicated -m -1"
+             (test  "-d -1"   '((()) (dave . "-1"))))
+
+   )
+
+
+(with-test-prefix "mcron backwards compatibility"
+
+  (define  (test  args  expectation)
+    (A-TEST  args
+             `((daemon   (single-char #\d) (value #f))
+               (stdin    (single-char #\i) (value #t)
+                         (predicate ,(λ (in) (or (string=? in "guile")
+                                                 (string=? in "vixie")))))
+               (schedule (single-char #\s) (value optional)
+                         (predicate ,(λ (in) (or (eq? in #t)
+                                                 (and (string? in)
+                                                      (string->number in))))))
+               (help     (single-char #\?))
+               (version  (single-char #\V)))
+             expectation))
+  
+  (pass-if  "-s8"   (test  "-s8 file"  '((() "file") (schedule . "8"))))
+
+  (pass-if  "-s 8"  (test "-s 8 file"  '((() "file") (schedule . "8"))))
+
+  (pass-if  "-sd file"
+            (test  "-sd file"   '((() "file") (daemon . #t) (schedule . #t))))
+
+  (pass-if  "--schedule=8"  (test  "--schedule=8 file"
+                                   '((() "file") (schedule . "8"))))
+
+  (pass-if  "--schedule 8"  (test "--schedule 8 file"
+                                  '((() "file") (schedule . "8"))))
+
+  (pass-if  "-ds8"   (test  "-ds8 file"
+                            '((() "file") (daemon . #t) (schedule . "8"))))
+
+  (pass-if  "-ds 8"  (test "-ds 8 file"
+                           '((() "file") (daemon . #t) (schedule . "8"))))
+
+  )
+                 
 ;;; getopt-long.test ends here
