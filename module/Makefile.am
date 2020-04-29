@@ -65,6 +65,7 @@ SOURCES =					\
   ice-9/futures.scm				\
   ice-9/gap-buffer.scm				\
   ice-9/getopt-long.scm				\
+  ice-9/command-line-processor.scm		\
   ice-9/hash-table.scm				\
   ice-9/hcons.scm				\
   ice-9/history.scm				\
