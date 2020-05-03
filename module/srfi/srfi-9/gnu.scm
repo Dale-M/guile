@@ -31,19 +31,25 @@
             set-fields))
 
 (define (set-record-type-printer! type proc)
-  "Set PROC as the custom printer for TYPE."
+  "- Scheme Procedure: set-record-type-printer! TYPE PROC
+     Set PROC as the custom printer for TYPE."
   (struct-set! type vtable-index-printer proc))
 
 (define-syntax-rule (define-immutable-record-type name ctor pred fields ...)
+  "- Scheme Procedure: define-immutable-record-type NAME CTOR PRED (FIELD GETTER [SETTER]) ..."
   ((@@ (srfi srfi-9) %define-record-type)
    #t (define-immutable-record-type name ctor pred fields ...)
    name ctor pred fields ...))
 
 (define-syntax-rule (set-field s (getter ...) expr)
+  "- Scheme Procedure: set-field RECORD (GETTER ...) EXPR
+      Set the field in RECORD with the GETTER, to the value of EXPR."
   (%set-fields #t (set-field s (getter ...) expr) ()
                s ((getter ...) expr)))
 
 (define-syntax-rule (set-fields s . rest)
+  "- Scheme Procedure: set-fields RECORD ((GETTER ...) EXPR) ...
+     Set the fields in the RECORD with the given GETTERs to the corresponding EXPRessions."
   (%set-fields #t (set-fields s . rest) ()
                s . rest))
 
