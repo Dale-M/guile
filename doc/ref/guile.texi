@@ -357,7 +357,7 @@ available through both Scheme and C interfaces.
 * SLIB::                        Using the SLIB Scheme library.
 * POSIX::                       POSIX system calls and networking.
 * Web::                         HTTP, the web, and all that.
-* getopt-long::                 Command line handling.
+* Command Line Processor::      Command line handling.
 * SRFI Support::                Support for various SRFIs.
 * R6RS Support::                Modules defined by the R6RS.
 * R7RS Support::                Modules defined by the R7RS.
@@ -381,7 +381,7 @@ available through both Scheme and C interfaces.
 @include slib.texi
 @include posix.texi
 @include web.texi
-@include mod-getopt-long.texi
+@include mod-command-line-processor.texi
 @include srfi-modules.texi
 @include r6rs.texi
 @include r7rs.texi

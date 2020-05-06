@@ -90,6 +90,7 @@ guile_TEXINFOS = preface.texi			\
 	 	 libguile-extensions.texi	\
 		 api-init.texi			\
 		 mod-getopt-long.texi		\
+		 mod-command-line-processor.texi	\
 		 statprof.texi			\
 		 sxml.texi			\
 		 texinfo.texi			\
