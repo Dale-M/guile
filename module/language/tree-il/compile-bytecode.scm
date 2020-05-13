@@ -2,19 +2,18 @@
 
 ;; Copyright (C) 2020 Free Software Foundation, Inc.
 
-;;;; This library is free software; you can redistribute it and/or
-;;;; modify it under the terms of the GNU Lesser General Public
-;;;; License as published by the Free Software Foundation; either
-;;;; version 3 of the License, or (at your option) any later version.
-;;;;
-;;;; This library is distributed in the hope that it will be useful,
-;;;; but WITHOUT ANY WARRANTY; without even the implied warranty of
-;;;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
-;;;; Lesser General Public License for more details.
-;;;;
-;;;; You should have received a copy of the GNU Lesser General Public
-;;;; License along with this library; if not, write to the Free Software
-;;;; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+;;; This library is free software; you can redistribute it and/or modify it
+;;; under the terms of the GNU Lesser General Public License as published by
+;;; the Free Software Foundation; either version 3 of the License, or (at
+;;; your option) any later version.
+;;;
+;;; This library is distributed in the hope that it will be useful, but
+;;; WITHOUT ANY WARRANTY; without even the implied warranty of
+;;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser
+;;; General Public License for more details.
+;;;
+;;; You should have received a copy of the GNU Lesser General Public License
+;;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 ;;;
@@ -26,27 +25,13 @@
 ;;;
 ;;; Code:
 
-;; FIXME: Add handle-interrupts, instrument-entry, and instrument-loop.
-
-;; FIXME: Verify that all SCM values on the stack will be marked.
-
-;; FIXME: Verify that the stack marker will never misinterpret an
-;; unboxed temporary (u64 or otherwise) as a SCM.
-
-;; FIXME: Verify that the debugger will never misinterpret an unboxed
-;; temporary as a SCM.
-
-;; FIXME: Add debugging source-location info.
-
 (define-module (language tree-il compile-bytecode)
   #:use-module (ice-9 match)
   #:use-module (language bytecode)
   #:use-module (language tree-il)
-  #:use-module (language tree-il analyze)
-  #:use-module (language tree-il optimize)
   #:use-module ((srfi srfi-1) #:select (filter-map
                                         fold
-                                        lset-union lset-difference))
+                                        lset-adjoin lset-union lset-difference))
   #:use-module (srfi srfi-9)
   #:use-module (system base types internal)
   #:use-module (system vm assembler)
@@ -68,12 +53,14 @@
       (emit-word-set!/immediate asm dst 0 tmp)
       (emit-word-set!/immediate asm dst 1 src)))))
 (define (emit-box-set! asm loc val)
-  (emit-word-set!/immediate asm loc 1 val))
+  (emit-scm-set!/immediate asm loc 1 val))
+(define (emit-box-ref asm dst loc)
+  (emit-scm-ref/immediate asm dst loc 1))
 (define (emit-cons asm dst car cdr)
   (cond
    ((= car dst)
     (emit-mov asm 1 car)
-    (emit-cons asm dst 1 (if (= cdr dst) 1 dst)))
+    (emit-cons asm dst 1 (if (= cdr dst) 1 cdr)))
    ((= cdr dst)
     (emit-mov asm 1 cdr)
     (emit-cons asm dst car 1))
@@ -82,7 +69,7 @@
     (emit-scm-set!/immediate asm dst 0 car)
     (emit-scm-set!/immediate asm dst 1 cdr))))
 
-(define (emit-cached-module-box asm dst mod name public? tmp)
+(define (emit-cached-module-box asm dst mod name public? bound? tmp)
   (define key (cons mod name))
   (define cached (gensym "cached"))
   (emit-cache-ref asm dst key)
@@ -91,10 +78,12 @@
   (emit-load-constant asm dst mod)
   (emit-resolve-module asm dst dst public?)
   (emit-load-constant asm tmp name)
-  (emit-lookup asm dst dst tmp)
+  (if bound?
+      (emit-lookup-bound asm dst dst tmp)
+      (emit-lookup asm dst dst tmp))
   (emit-cache-set! asm key dst)
   (emit-label asm cached))
-(define (emit-cached-toplevel-box asm dst scope name tmp)
+(define (emit-cached-toplevel-box asm dst scope name bound? tmp)
   (define key (cons scope name))
   (define cached (gensym "cached"))
   (emit-cache-ref asm dst key)
@@ -102,13 +91,17 @@
   (emit-je asm cached)
   (emit-cache-ref asm dst scope)
   (emit-load-constant asm tmp name)
-  (emit-lookup asm dst dst tmp)
+  (if bound?
+      (emit-lookup-bound asm dst dst tmp)
+      (emit-lookup asm dst dst tmp))
   (emit-cache-set! asm key dst)
   (emit-label asm cached))
-(define (emit-toplevel-box asm dst name tmp)
+(define (emit-toplevel-box asm dst name bound? tmp)
   (emit-current-module asm dst)
   (emit-load-constant asm tmp name)
-  (emit-lookup asm dst dst tmp))
+  (if bound?
+      (emit-lookup-bound asm dst dst tmp)
+      (emit-lookup asm dst dst tmp)))
 
 (define closure-header-words 2)
 (define (emit-allocate-closure asm dst nfree label tmp)
@@ -261,6 +254,7 @@
   (push-dynamic-state #:nargs 1                #:emit emit-push-dynamic-state)
   (pop-dynamic-state  #:nargs 0                #:emit emit-pop-dynamic-state)
   (push-fluid       #:nargs 2                  #:emit emit-push-fluid)
+  (pop-fluid        #:nargs 0                  #:emit emit-pop-fluid)
   (pop-fluid-state  #:nargs 0                  #:emit emit-pop-dynamic-state)
   (fluid-ref        #:nargs 1 #:has-result? #t #:emit emit-fluid-ref)
   (fluid-set!       #:nargs 2                  #:emit emit-fluid-set!)
@@ -304,7 +298,7 @@
                                                         (emit-jne asm kf)))
   (<                #:nargs 2 #:predicate? #t  #:emit (lambda (asm a b kf)
                                                         (emit-<? asm a b)
-                                                        (emit-jl asm kf)))
+                                                        (emit-jnl asm kf)))
   (<=               #:nargs 2 #:predicate? #t  #:emit (lambda (asm a b kf)
                                                         (emit-<? asm b a)
                                                         (emit-jnge asm kf)))
@@ -511,7 +505,7 @@
        ;; expressions.  (Escape-only prompt bodies are already
        ;; expressions.)
        (($ <prompt> src #f tag body handler)
-        (make-prompt src tag #f (make-call src body '()) handler))
+        (make-prompt src #f tag (make-call src body '()) handler))
 
        (_ exp)))
    exp))
@@ -544,6 +538,7 @@
   ;; lambdas are seen, and adding set! vars to `assigned'.
   (define (visit-closure exp module-scope)
     (define (visit exp)
+      (define (adjoin sym f) (lset-adjoin eq? f sym))
       (define (union f1 f2) (lset-union eq? f1 f2))
       (define (union3 f1 f2 f3) (union f1 (union f2 f3)))
       (define (difference f1 f2) (lset-difference eq? f1 f2))
@@ -600,7 +595,7 @@
 
         (($ <lexical-set> src name gensym exp)
          (hashq-set! assigned gensym #t)
-         (visit exp))
+         (adjoin gensym (visit exp)))
 
         (($ <seq> src head tail)
          (union (visit head) (visit tail)))
@@ -747,25 +742,20 @@ in the frame with for the lambda-case clause @var{clause}."
            (lookup-lexical sym prev)))
       (_ (error "sym not found!" sym))))
 
-  (define (frame-base env)
-    (match env
-      (($ <env> _ 'frame-base #f)
-       env)
-      (($ <env> prev)
-       (frame-base prev))))
-
   (define (compile-body clause module-scope free-vars frame-size)
-    (define (push-free-var sym idx env)
-      (make-env env sym sym idx #t (assigned? sym) #f))
+    (define frame-base
+      (make-env #f 'frame-base #f #f #f #f (- frame-size 1)))
 
-    (define (push-closure env)
-      (push-local 'closure #f
-                  (make-env env 'frame-base #f #f #f #f (- frame-size 1))))
+    (define (push-free-var sym idx env)
+      (make-env env sym sym idx #t (assigned? sym) (env-next-local env)))
 
     (define (push-local name sym env)
       (let ((idx (env-next-local env)))
         (emit-definition asm name (- frame-size idx 1) 'scm)
         (make-env env name sym idx #f (assigned? sym) (1- idx))))
+
+    (define (push-closure env)
+      (push-local 'closure #f env))
 
     (define (push-local-alias name sym idx env)
       (make-env env name sym idx #f #f (env-next-local env)))
@@ -788,7 +778,7 @@ in the frame with for the lambda-case clause @var{clause}."
             ((sym . free)
              (lp (1+ idx) free
                  (push-free-var sym idx env))))))
-      (fold push-local (push-closure (push-free-vars #f)) names syms))
+      (fold push-local (push-closure (push-free-vars frame-base)) names syms))
 
     (define (stack-height env)
       (- frame-size (env-next-local env) 1))
@@ -798,6 +788,9 @@ in the frame with for the lambda-case clause @var{clause}."
         (emit-current-module asm 0)
         (emit-cache-set! asm scope 0)))
             
+    (define (maybe-emit-source source)
+      (when source (emit-source asm source)))
+
     (define (init-free-vars dst free-vars env tmp0 tmp1)
       (let lp ((free-idx 0) (free-vars free-vars))
         (unless (null? free-vars)
@@ -822,6 +815,7 @@ in the frame with for the lambda-case clause @var{clause}."
               env names syms))
       (let ((proc-slot (stack-height env))
             (nreq (length req)))
+        (maybe-emit-source src)
         (unless (and rest (zero? nreq))
           (emit-receive-values asm proc-slot (->bool rest) nreq))
         (when rest
@@ -835,6 +829,7 @@ in the frame with for the lambda-case clause @var{clause}."
         (($ <prompt> src escape-only? tag body
             ($ <lambda> hsrc hmeta
                ($ <lambda-case> _ hreq #f hrest #f () hsyms hbody #f)))
+         (maybe-emit-source src)
          (let ((tag (env-idx (for-value tag env)))
                (proc-slot (stack-height env))
                (khandler (gensym "handler"))
@@ -845,8 +840,9 @@ in the frame with for the lambda-case clause @var{clause}."
              ('tail
               ;; Would be nice if we could invoke the body in true tail
               ;; context, but that's not how it currently is.
-              (for-values body env)
+              (for-values-at body env frame-base)
               (emit-unwind asm)
+              (emit-handle-interrupts asm)
               (emit-return-values asm))
              (_
               (for-context body env ctx)
@@ -862,10 +858,12 @@ in the frame with for the lambda-case clause @var{clause}."
       (match exp
         (($ <conditional> src ($ <primcall> tsrc name args)
             consequent alternate)
+         (maybe-emit-source tsrc)
          (let ((emit (primitive-emitter (lookup-primitive name)))
                (args (for-args args env))
                (kf (gensym "false"))
                (kdone (gensym "done")))
+           (maybe-emit-source src)
            (match args
              ((a) (emit asm a kf))
              ((a b) (emit asm a b kf)))
@@ -879,6 +877,7 @@ in the frame with for the lambda-case clause @var{clause}."
     (define (visit-seq exp env ctx)
       (match exp
         (($ <seq> src head tail)
+         (maybe-emit-source src)
          (for-effect head env)
          (for-context tail env ctx))))
 
@@ -893,6 +892,7 @@ in the frame with for the lambda-case clause @var{clause}."
               env names syms vals))
       (match exp
         (($ <let> src names syms vals body)
+         (maybe-emit-source src)
          (for-context body (push-bindings names syms vals env) ctx))))
 
     (define (visit-fix exp env ctx)
@@ -903,6 +903,8 @@ in the frame with for the lambda-case clause @var{clause}."
                        (let ((env (push-local name sym env)))
                          (match closure
                            (($ <closure> label code scope free-vars)
+                            ;; FIXME: Allocate one scope per fix.
+                            (maybe-cache-module! scope 0)
                             (emit-maybe-allocate-closure
                              asm (env-idx env) (length free-vars) label 0)
                             env))))
@@ -917,12 +919,14 @@ in the frame with for the lambda-case clause @var{clause}."
           env))
       (match exp
         (($ <fix> src names syms vals body)
+         (maybe-emit-source src)
          (for-context body (push-bindings names syms vals env) ctx))))
 
     (define (visit-let-values exp env ctx)
       (match exp
         (($ <let-values> src exp
             ($ <lambda-case> lsrc req #f rest #f () syms body #f))
+         (maybe-emit-source src)
          (for-values exp env)
          (visit-values-handler lsrc req rest syms body env ctx))))
 
@@ -954,36 +958,42 @@ in the frame with for the lambda-case clause @var{clause}."
 
         (($ <lexical-set> src name sym exp)
          (let ((env (for-value exp env)))
+           (maybe-emit-source src)
            (match (lookup-lexical sym env)
              (($ <env> _ _ _ idx #t #t) ;; Boxed closure.
               (emit-load-free-variable asm 0 (1- frame-size) idx 0)
-              (emit-$variable-set! asm 0 (env-idx env)))
+              (emit-box-set! asm 0 (env-idx env)))
              (($ <env> _ _ _ idx #f #t) ;; Boxed local.
-              (emit-$variable-set! asm idx (env-idx env))))))
+              (emit-box-set! asm idx (env-idx env))))))
 
         (($ <module-set> src mod name public? exp)
          (let ((env (for-value exp env)))
-           (emit-cached-module-box asm 0 mod name public? 1)
-           (emit-$variable-set! asm 0 (env-idx env))))
+           (maybe-emit-source src)
+           (emit-cached-module-box asm 0 mod name public? #f 1)
+           (emit-box-set! asm 0 (env-idx env))))
 
         (($ <toplevel-set> src mod name exp)
          (let ((env (for-value exp env)))
+           (maybe-emit-source src)
            (if module-scope
-               (emit-cached-toplevel-box asm 0 module-scope name 1)
-               (emit-toplevel-box asm 0 name 1))
-           (emit-$variable-set! asm 0 (env-idx env))))
+               (emit-cached-toplevel-box asm 0 module-scope name #f 1)
+               (emit-toplevel-box asm 0 name #f 1))
+           (emit-box-set! asm 0 (env-idx env))))
 
         (($ <toplevel-define> src mod name exp)
          (let ((env (for-value exp env)))
+           (maybe-emit-source src)
            (emit-current-module asm 0)
            (emit-load-constant asm 1 name)
            (emit-define! asm 0 0 1)
-           (emit-$variable-set! asm 0 (env-idx env))))
+           (emit-box-set! asm 0 (env-idx env))))
 
         (($ <call> src proc args)
          (let ((proc-slot (let ((env (push-frame env)))
                             (fold for-push (for-push proc env) args)
                             (stack-height env))))
+           (maybe-emit-source src)
+           (emit-handle-interrupts asm)
            (emit-call asm proc-slot (1+ (length args)))
            (emit-reset-frame asm frame-size)))
 
@@ -1000,23 +1010,27 @@ in the frame with for the lambda-case clause @var{clause}."
                ((a ($ <const> _ (? emit/immediate? b)))
                 (let ((emit (primitive-emitter/immediate prim)))
                   (match (for-args (list a) env)
-                    ((a) (emit asm a b)))))
+                    ((a)
+                     (maybe-emit-source src)
+                     (emit asm a b)))))
                ((a ($ <const> _ (? emit/immediate? b)) c)
                 (let ((emit (primitive-emitter/immediate prim)))
                   (match (for-args (list a c) env)
-                    ((a c) (emit asm a b c)))))
+                    ((a c)
+                     (maybe-emit-source src)
+                     (emit asm a b c)))))
                (_
-                (let ((emit (primitive-emitter prim)))
-                  (apply emit asm (for-args args env)))))))))
+                (let ((emit (primitive-emitter prim))
+                      (args (for-args args env)))
+                  (maybe-emit-source src)
+                  (apply emit asm args))))))))
 
         (($ <prompt>)       (visit-prompt exp env 'effect))
         (($ <conditional>)  (visit-conditional exp env 'effect))
         (($ <seq>)          (visit-seq exp env 'effect))
         (($ <let>)          (visit-let exp env 'effect))
         (($ <fix>)          (visit-fix exp env 'effect))
-        (($ <let-values>)   (visit-let-values exp env 'effect)))
-
-      (values))
+        (($ <let-values>)   (visit-let-values exp env 'effect))))
 
     (define (for-value-at exp env base)
       ;; The baseline compiler follows a stack discipline: compiling
@@ -1065,31 +1079,36 @@ in the frame with for the lambda-case clause @var{clause}."
       (define dst (env-idx dst-env))
       (match exp
         (($ <lexical-ref> src name sym)
+         (maybe-emit-source src)
          (match (lookup-lexical sym env)
            (($ <env> _ _ _ idx #t #t)
             (emit-load-free-variable asm dst (1- frame-size) idx 0)
-            (emit-$variable-ref asm dst dst))
+            (emit-box-ref asm dst dst))
            (($ <env> _ _ _ idx #t #f)
             (emit-load-free-variable asm dst (1- frame-size) idx 0))
            (($ <env> _ _ _ idx #f #t)
-            (emit-$variable-ref asm dst idx))
+            (emit-box-ref asm dst idx))
            (($ <env> _ _ _ idx #f #f)
             (emit-mov asm dst idx))))
 
         (($ <const> src val)
+         (maybe-emit-source src)
          (emit-load-constant asm dst val))
 
         (($ <module-ref> src mod name public?)
-         (emit-cached-module-box asm 0 mod name public? 1)
-         (emit-$variable-ref asm dst 0))
+         (maybe-emit-source src)
+         (emit-cached-module-box asm 0 mod name public? #t 1)
+         (emit-box-ref asm dst 0))
 
         (($ <toplevel-ref> src mod name)
+         (maybe-emit-source src)
          (if module-scope
-             (emit-cached-toplevel-box asm 0 module-scope name 1)
-             (emit-toplevel-box asm 0 name 1))
-         (emit-$variable-ref asm dst 0))
+             (emit-cached-toplevel-box asm 0 module-scope name #t 1)
+             (emit-toplevel-box asm 0 name #t 1))
+         (emit-box-ref asm dst 0))
 
         (($ <lambda> src)
+         (maybe-emit-source src)
          (match (lookup-closure exp)
            (($ <closure> label code scope free-vars)
             (maybe-cache-module! scope 0)
@@ -1114,12 +1133,15 @@ in the frame with for the lambda-case clause @var{clause}."
          (let ((proc-slot (let ((env (push-frame env)))
                             (fold for-push (for-push proc env) args)
                             (stack-height env))))
-           (emit-call asm proc-slot (length args))
-           (emit-receive src dst proc-slot frame-size)))
+           (maybe-emit-source src)
+           (emit-handle-interrupts asm)
+           (emit-call asm proc-slot (1+ (length args)))
+           (emit-receive asm (stack-height base) proc-slot frame-size)))
 
         (($ <primcall> src (? variadic-constructor? name) args)
          ;; Stage result in 0 to avoid stompling args.
          (let ((args (for-args args env)))
+           (maybe-emit-source src)
            (match name
              ('list
               (emit-load-constant asm 0 '())
@@ -1136,12 +1158,14 @@ in the frame with for the lambda-case clause @var{clause}."
              ('make-struct/simple
               (match args
                 ((vtable . args)
-                 (let ((len (length args)))
-                   (emit-$allocate-struct asm 0 vtable len)
-                   (let lp ((i 0) (args args))
-                     (when (< i len)
-                       (emit-struct-init! asm 0 i (car args) 1)
-                       (lp (1+ i) (cdr args)))))))))
+                 (emit-load-constant asm 0 (length args))
+                 (emit-$allocate-struct asm 0 vtable 0)
+                 (let lp ((i 0) (args args))
+                   (match args
+                     (() #t)
+                     ((arg . args)
+                      (emit-struct-init! asm 0 i arg 1)
+                      (lp (1+ i) args))))))))
            (emit-mov asm dst 0)))
 
         (($ <primcall> src name args)
@@ -1157,22 +1181,25 @@ in the frame with for the lambda-case clause @var{clause}."
              (match args
                ((($ <const> _ (? emit/immediate? a)))
                 (let* ((emit (primitive-emitter/immediate prim)))
+                  (maybe-emit-source src)
                   (emit asm dst a)))
                ((a ($ <const> _ (? emit/immediate? b)))
                 (let* ((emit (primitive-emitter/immediate prim))
                        (a (for-value a env)))
+                  (maybe-emit-source src)
                   (emit asm dst (env-idx a) b)))
                (_
-                (let ((emit (primitive-emitter prim)))
-                  (apply emit asm dst (for-args args env)))))))))
+                (let ((emit (primitive-emitter prim))
+                      (args (for-args args env)))
+                  (maybe-emit-source src)
+                  (apply emit asm dst args))))))))
 
         (($ <prompt>)       (visit-prompt exp env `(value-at . ,base)))
-        (($ <conditional>)  (visit-conditional exp env `(value-at. ,base)))
+        (($ <conditional>)  (visit-conditional exp env `(value-at . ,base)))
         (($ <seq>)          (visit-seq exp env `(value-at . ,base)))
         (($ <let>)          (visit-let exp env `(value-at . ,base)))
         (($ <fix>)          (visit-fix exp env `(value-at . ,base)))
-        (($ <let-values>)   (visit-let-values exp env `(value-at . ,base))))
-      dst-env)
+        (($ <let-values>)   (visit-let-values exp env `(value-at . ,base)))))
 
     (define (for-value exp env)
       (match (and (lexical-ref? exp)
@@ -1183,7 +1210,8 @@ in the frame with for the lambda-case clause @var{clause}."
          (for-push exp env))))
 
     (define (for-push exp env)
-      (for-value-at exp env env))
+      (for-value-at exp env env)
+      (push-temp env))
 
     (define (for-init sym init env)
       (match (lookup-lexical sym env)
@@ -1217,6 +1245,8 @@ in the frame with for the lambda-case clause @var{clause}."
                 (env (push-frame env))
                 (from (stack-height env)))
            (fold for-push (for-push proc env) args)
+           (maybe-emit-source src)
+           (emit-handle-interrupts asm)
            (emit-call asm from (1+ (length args)))
            (unless (= from to)
              (emit-shuffle-down asm from to))))
@@ -1226,9 +1256,7 @@ in the frame with for the lambda-case clause @var{clause}."
         (($ <seq>)          (visit-seq exp env `(values-at . ,base)))
         (($ <let>)          (visit-let exp env `(values-at . ,base)))
         (($ <fix>)          (visit-fix exp env `(values-at . ,base)))
-        (($ <let-values>)   (visit-let-values exp env `(values-at . ,base))))
-
-      (values))
+        (($ <let-values>)   (visit-let-values exp env `(values-at . ,base)))))
 
     (define (for-values exp env)
       (for-values-at exp env env))
@@ -1245,17 +1273,20 @@ in the frame with for the lambda-case clause @var{clause}."
              ($ <module-set>)
              ($ <lambda>)
              ($ <primcall>))
-         (for-values-at exp env (frame-base env))
+         (for-values-at exp env frame-base)
+         (emit-handle-interrupts asm)
          (emit-return-values asm))
 
         (($ <call> src proc args)
          (let* ((base (stack-height env))
                 (env (fold for-push (for-push proc env) args)))
+           (maybe-emit-source src)
            (let lp ((i (length args)) (env env))
              (when (<= 0 i)
                (lp (1- i) (env-prev env))
                (emit-mov asm (+ (env-idx env) base) (env-idx env))))
            (emit-reset-frame asm (+ 1 (length args)))
+           (emit-handle-interrupts asm)
            (emit-tail-call asm)))
 
         (($ <prompt>)       (visit-prompt exp env 'tail))
@@ -1263,9 +1294,7 @@ in the frame with for the lambda-case clause @var{clause}."
         (($ <seq>)          (visit-seq exp env 'tail))
         (($ <let>)          (visit-let exp env 'tail))
         (($ <fix>)          (visit-fix exp env 'tail))
-        (($ <let-values>)   (visit-let-values exp env 'tail)))
-
-      (values))
+        (($ <let-values>)   (visit-let-values exp env 'tail))))
 
     (match clause
       (($ <lambda-case> src req opt rest kw inits syms body alt)
@@ -1281,6 +1310,7 @@ in the frame with for the lambda-case clause @var{clause}."
                             (list-tail inits (if opt (length opt) 0)))))
          (unless (= (length names) (length syms) (length inits))
            (error "unexpected args" names syms inits))
+         (maybe-emit-source src)
          (let ((env (create-initial-env names syms free-vars)))
            (for-each (lambda (sym init) (for-init sym init env)) syms inits)
            (for-tail body env))))))
@@ -1298,7 +1328,7 @@ in the frame with for the lambda-case clause @var{clause}."
                     (values aok?
                             (map (match-lambda
                                   ((key name sym)
-                                   (cons key (list-index syms sym))))
+                                   (cons key (1+ (list-index syms sym)))))
                                  kw)))))
              (lambda (allow-other-keys? kw-indices)
                (when label (emit-label asm label))
@@ -1316,35 +1346,13 @@ in the frame with for the lambda-case clause @var{clause}."
      (emit-clause #f body module-scope free)
      (emit-end-program asm))))
 
-(define %warning-passes
-  `((unused-variable             . ,unused-variable-analysis)
-    (unused-toplevel             . ,unused-toplevel-analysis)
-    (shadowed-toplevel           . ,shadowed-toplevel-analysis)
-    (unbound-variable            . ,unbound-variable-analysis)
-    (macro-use-before-definition . ,macro-use-before-definition-analysis)
-    (arity-mismatch              . ,arity-analysis)
-    (format                      . ,format-analysis)))
-
-(define (optimize-tree-il x e opts)
-  (define warnings
-    (or (and=> (memq #:warnings opts) cadr)
-        '()))
-
-  ;; Go through the warning passes.
-  (let ((analyses (filter-map (lambda (kind)
-                                (assoc-ref %warning-passes kind))
-                              warnings)))
-    (analyze-tree analyses x e))
-
-  (optimize x e opts))
-
 (define (kw-arg-ref args kw default)
   (match (memq kw args)
     ((_ val . _) val)
     (_ default)))
 
 (define (compile-bytecode exp env opts)
-  (let* ((exp (canonicalize (optimize-tree-il exp env opts)))
+  (let* ((exp (canonicalize exp))
          (asm (make-assembler)))
     (call-with-values (lambda () (split-closures exp))
       (lambda (closures assigned)

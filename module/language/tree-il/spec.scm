@@ -1,6 +1,6 @@
 ;;; Tree Intermediate Language
 
-;; Copyright (C) 2009, 2010, 2011, 2013, 2015 Free Software Foundation, Inc.
+;; Copyright (C) 2009-2011,2013,2015,2020 Free Software Foundation, Inc.
 
 ;;;; This library is free software; you can redistribute it and/or
 ;;;; modify it under the terms of the GNU Lesser General Public
@@ -20,21 +20,31 @@
 
 (define-module (language tree-il spec)
   #:use-module (system base language)
-  #:use-module (system base pmatch)
+  #:use-module (ice-9 match)
   #:use-module (language tree-il)
-  #:use-module (language tree-il compile-cps)
+  #:use-module ((language tree-il analyze) #:select (make-analyzer))
+  #:use-module ((language tree-il optimize) #:select (make-lowerer))
   #:export (tree-il))
 
 (define (write-tree-il exp . port)
   (apply write (unparse-tree-il exp) port))
 
 (define (join exps env)
-  (pmatch exps
+  (match exps
     (() (make-void #f))
-    ((,x) x)
-    ((,x . ,rest)
+    ((x) x)
+    ((x . rest)
      (make-seq #f x (join rest env)))
-    (else (error "what!" exps env))))
+    (_ (error "what!" exps env))))
+
+(define (choose-compiler target optimization-level opts)
+  (define (load-compiler compiler)
+    (module-ref (resolve-interface `(language tree-il ,compiler)) compiler))
+  (if (match (memq #:cps? opts)
+        ((_ cps? . _) cps?)
+        (#f (<= 1 optimization-level)))
+      (cons 'cps (load-compiler 'compile-cps))
+      (cons 'bytecode (load-compiler 'compile-bytecode))))
 
 (define-language tree-il
   #:title	"Tree Intermediate Language"
@@ -42,5 +52,7 @@
   #:printer	write-tree-il
   #:parser      parse-tree-il
   #:joiner      join
-  #:compilers   `((cps . ,compile-cps))
+  #:compiler-chooser choose-compiler
+  #:analyzer    make-analyzer
+  #:lowerer     make-lowerer
   #:for-humans? #f)

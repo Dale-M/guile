@@ -60,8 +60,6 @@
   #:use-module (language cps utils)
   #:use-module (language cps with-cps)
   #:use-module (language tree-il cps-primitives)
-  #:use-module (language tree-il analyze)
-  #:use-module (language tree-il optimize)
   #:use-module (language tree-il)
   #:use-module (language cps intmap)
   #:export (compile-cps))
@@ -1403,36 +1401,16 @@
     scope-id))
 
 (define (toplevel-box cps src name bound? have-var)
-  (define %unbound
-    #(unbound-variable #f "Unbound variable: ~S"))
   (match (current-topbox-scope)
     (#f
      (with-cps cps
        (letv mod name-var box)
-       (letk kbad ($kargs () () ($throw src 'throw/value %unbound (name-var))))
-       (let$ body
-             ((if bound?
-                  (lambda (cps)
-                    (with-cps cps
-                      (letv val)
-                      (let$ body (have-var box))
-                      (letk kdef ($kargs () () ,body))
-                      (letk ktest ($kargs ('val) (val)
-                                    ($branch kdef kbad src
-                                      'undefined? #f (val))))
-                      (build-term
-                        ($continue ktest src
-                          ($primcall 'scm-ref/immediate
-                                     '(box . 1) (box))))))
-                  (lambda (cps)
-                    (with-cps cps
-                      ($ (have-var box)))))))
-       (letk ktest ($kargs () () ,body))
-       (letk kbox ($kargs ('box) (box)
-                    ($branch kbad ktest src 'heap-object? #f (box))))
+       (let$ body (have-var box))
+       (letk kbox ($kargs ('box) (box) ,body))
        (letk kname ($kargs ('name) (name-var)
                      ($continue kbox src
-                       ($primcall 'lookup #f (mod name-var)))))
+                       ($primcall (if bound? 'lookup-bound 'lookup) #f
+                                  (mod name-var)))))
        (letk kmod ($kargs ('mod) (mod)
                     ($continue kname src ($const name))))
        (build-term
@@ -2324,28 +2302,6 @@ integer."
 
 (define *comp-module* (make-fluid))
 
-(define %warning-passes
-  `((unused-variable             . ,unused-variable-analysis)
-    (unused-toplevel             . ,unused-toplevel-analysis)
-    (shadowed-toplevel           . ,shadowed-toplevel-analysis)
-    (unbound-variable            . ,unbound-variable-analysis)
-    (macro-use-before-definition . ,macro-use-before-definition-analysis)
-    (arity-mismatch              . ,arity-analysis)
-    (format                      . ,format-analysis)))
-
-(define (optimize-tree-il x e opts)
-  (define warnings
-    (or (and=> (memq #:warnings opts) cadr)
-        '()))
-
-  ;; Go through the warning passes.
-  (let ((analyses (filter-map (lambda (kind)
-                                (assoc-ref %warning-passes kind))
-                              warnings)))
-    (analyze-tree analyses x e))
-
-  (optimize x e opts))
-
 (define (canonicalize exp)
   (define-syntax-rule (with-lexical src id . body)
     (let ((k (lambda (id) . body)))
@@ -2560,10 +2516,7 @@ integer."
    exp))
 
 (define (compile-cps exp env opts)
-  (values (cps-convert/thunk
-           (canonicalize (optimize-tree-il exp env opts)))
-          env
-          env))
+  (values (cps-convert/thunk (canonicalize exp)) env env))
 
 ;;; Local Variables:
 ;;; eval: (put 'convert-arg 'scheme-indent-function 2)

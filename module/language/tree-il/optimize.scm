@@ -27,7 +27,9 @@
   #:use-module (language tree-il peval)
   #:use-module (language tree-il primitives)
   #:use-module (ice-9 match)
+  #:use-module (system base optimize)
   #:export (optimize
+            make-lowerer
             tree-il-optimizations))
 
 (define (kw-arg-ref args kw default)
@@ -61,17 +63,15 @@
   x)
 
 (define (tree-il-optimizations)
-  ;; Avoid resolve-primitives until -O2, when CPS optimizations kick in.
-  ;; Otherwise, inlining the primcalls during Tree-IL->CPS compilation
-  ;; will result in a lot of code that will never get optimized nicely.
-  ;; Similarly letrectification is great for generated code quality, but
-  ;; as it gives the compiler more to work with, it increases compile
-  ;; time enough that we reserve it for -O2.  Also, this makes -O1 avoid
-  ;; assumptions about top-level values, in the same way that avoiding
-  ;; resolve-primitives does.
-  '((#:resolve-primitives? 2)
-    (#:expand-primitives? 1)
-    (#:letrectify? 2)
-    (#:seal-private-bindings? 3)
-    (#:partial-eval? 1)
-    (#:eta-expand? 2)))
+  (available-optimizations 'tree-il))
+
+(define (make-lowerer optimization-level opts)
+  (define (enabled-for-level? level) (<= level optimization-level))
+  (let ((opts (let lp ((all-opts (tree-il-optimizations)))
+                (match all-opts
+                  (() '())
+                  (((kw level) . all-opts)
+                   (acons kw (kw-arg-ref opts kw (enabled-for-level? level))
+                          (lp all-opts)))))))
+    (lambda (exp env)
+      (optimize exp env opts))))

@@ -29,12 +29,6 @@
   #:use-module (language cps)
   #:use-module (language cps slot-allocation)
   #:use-module (language cps utils)
-  #:use-module (language cps closure-conversion)
-  #:use-module (language cps loop-instrumentation)
-  #:use-module (language cps optimize)
-  #:use-module (language cps reify-primitives)
-  #:use-module (language cps renumber)
-  #:use-module (language cps split-rec)
   #:use-module (language cps intmap)
   #:use-module (language cps intset)
   #:use-module (system vm assembler)
@@ -192,8 +186,15 @@
          (emit-cache-ref asm (from-sp dst) key))
         (($ $primcall 'resolve-module public? (name))
          (emit-resolve-module asm (from-sp dst) (from-sp (slot name)) public?))
+        (($ $primcall 'module-variable #f (mod name))
+         (emit-module-variable asm (from-sp dst) (from-sp (slot mod))
+                               (from-sp (slot name))))
         (($ $primcall 'lookup #f (mod name))
-         (emit-lookup asm (from-sp dst) (from-sp (slot mod)) (from-sp (slot name))))
+         (emit-lookup asm (from-sp dst) (from-sp (slot mod))
+                      (from-sp (slot name))))
+        (($ $primcall 'lookup-bound #f (mod name))
+         (emit-lookup-bound asm (from-sp dst) (from-sp (slot mod))
+                            (from-sp (slot name))))
         (($ $primcall 'add/immediate y (x))
          (emit-add/immediate asm (from-sp dst) (from-sp (slot x)) y))
         (($ $primcall 'sub/immediate y (x))
@@ -680,7 +681,7 @@
 
     (intmap-for-each compile-cont cps)))
 
-(define (emit-bytecode exp env opts)
+(define (compile-bytecode exp env opts)
   (let ((asm (make-assembler)))
     (intmap-for-each (lambda (kfun body)
                        (compile-function (intmap-select exp body) asm opts))
@@ -688,20 +689,3 @@
     (values (link-assembly asm #:page-aligned? (kw-arg-ref opts #:to-file? #f))
             env
             env)))
-
-(define (lower-cps exp opts)
-  ;; FIXME: For now the closure conversion pass relies on $rec instances
-  ;; being separated into SCCs.  We should fix this to not be the case,
-  ;; and instead move the split-rec pass back to
-  ;; optimize-higher-order-cps.
-  (set! exp (split-rec exp))
-  (set! exp (optimize-higher-order-cps exp opts))
-  (set! exp (convert-closures exp))
-  (set! exp (optimize-first-order-cps exp opts))
-  (set! exp (reify-primitives exp))
-  (set! exp (add-loop-instrumentation exp))
-  (renumber exp))
-
-(define (compile-bytecode exp env opts)
-  (set! exp (lower-cps exp opts))
-  (emit-bytecode exp env opts))

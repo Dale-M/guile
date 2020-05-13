@@ -201,34 +201,14 @@
   (wrap-unary cps k src 's64->u64 'u64->s64 'ulsh/immediate param a))
 
 (define (reify-lookup cps src mod-var name assert-bound? have-var)
-  (define (%lookup cps kbad k src mod-var name-var var assert-bound?)
-    (if assert-bound?
-        (with-cps cps
-          (letv val)
-          (letk kcheck
-                ($kargs ('val) (val)
-                  ($branch k kbad src 'undefined? #f (val))))
-          (letk kref
-                ($kargs () ()
-                  ($continue kcheck src
-                    ($primcall 'scm-ref/immediate '(box . 1) (var)))))
-          ($ (%lookup kbad kref src mod-var name-var var #f)))
-        (with-cps cps
-          (letk kres
-                ($kargs ('var) (var)
-                  ($branch kbad k src 'heap-object? #f (var))))
-          (build-term
-            ($continue kres src
-              ($primcall 'lookup #f (mod-var name-var)))))))
-  (define %unbound
-    #(unbound-variable #f "Unbound variable: ~S"))
   (with-cps cps
     (letv name-var var)
-    (let$ good (have-var var))
-    (letk kgood ($kargs () () ,good))
-    (letk kbad ($kargs () () ($throw src 'throw/value %unbound (name-var))))
-    (let$ body (%lookup kbad kgood src mod-var name-var var assert-bound?))
-    (letk klookup ($kargs ('name) (name-var) ,body))
+    (let$ body (have-var var))
+    (letk kres ($kargs ('var) (var) ,body))
+    (letk klookup ($kargs ('name) (name-var)
+                    ($continue kres src
+                      ($primcall (if assert-bound? 'lookup-bound 'lookup) #f
+                                 (mod-var name-var)))))
     (build-term ($continue klookup src ($const name)))))
 
 (define (reify-resolve-module cps k src module public?)
@@ -354,7 +334,8 @@
       push-dynamic-state pop-dynamic-state
       lsh rsh lsh/immediate rsh/immediate
       cache-ref cache-set!
-      resolve-module lookup define! current-module))
+      current-module resolve-module
+      module-variable lookup lookup-bound define!))
   (let ((table (make-hash-table)))
     (for-each
      (match-lambda ((inst . _) (hashq-set! table inst #t)))

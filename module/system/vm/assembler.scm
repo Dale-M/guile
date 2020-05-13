@@ -256,7 +256,9 @@
             emit-lsh/immediate
             emit-rsh/immediate
             emit-resolve-module
+            emit-module-variable
             emit-lookup
+            emit-lookup-bound
             emit-define!
             emit-current-module
 
@@ -973,6 +975,15 @@ later by the linker."
     (emit-push asm (+ c 2))
     (encode-X8_S8_S8_S8-C32 asm 2 1 0 c32 opcode)
     (emit-drop asm 3))))
+(define (encode-X8_S8_C8_S8-C32!/shuffle asm a const b c32 opcode)
+  (cond
+   ((< (logior a b) (ash 1 8))
+    (encode-X8_S8_C8_S8-C32 asm a const b c32 opcode))
+   (else
+    (emit-push asm a)
+    (emit-push asm (+ b 1))
+    (encode-X8_S8_C8_S8-C32 asm 1 const 0 c32 opcode)
+    (emit-drop asm 2))))
 (define (encode-X8_S12_S12-C32<-/shuffle asm dst src c32 opcode)
   (cond
    ((< (logior dst src) (ash 1 12))
@@ -1009,9 +1020,9 @@ later by the linker."
       (('<- 'X8_S8_S8_S8)        #'encode-X8_S8_S8_S8<-/shuffle)
       (('<- 'X8_S8_S8_C8)        #'encode-X8_S8_S8_C8<-/shuffle)
       (('! 'X8_S8_S8_S8 'C32)    #'encode-X8_S8_S8_S8-C32!/shuffle)
+      (('! 'X8_S8_C8_S8 'C32)    #'encode-X8_S8_C8_S8-C32!/shuffle)
       (('<- 'X8_S8_S8_S8 'C32)   #'encode-X8_S8_S8_S8-C32<-/shuffle)
       (('<- 'X8_S8_S8_C8 'C32)   #'encode-X8_S8_S8_C8-C32<-/shuffle)
-      (('! 'X8_S8_S8_C8 'C32)    #'encode-X8_S8_S8_C8-C32!/shuffle)
       (('<- 'X8_S12_S12 'C32)    #'encode-X8_S12_S12-C32<-/shuffle)
       (('! 'X8_S12_S12 'C32)     #'encode-X8_S12_S12-C32!/shuffle)
       (('! 'X8_S8_C8_S8)         #'encode-X8_S8_C8_S8!/shuffle)
@@ -1493,7 +1504,9 @@ returned instead."
 (define-scm<-scm-uimm-intrinsic lsh/immediate)
 (define-scm<-scm-uimm-intrinsic rsh/immediate)
 (define-scm<-scm-bool-intrinsic resolve-module)
+(define-scm<-scm-scm-intrinsic module-variable)
 (define-scm<-scm-scm-intrinsic lookup)
+(define-scm<-scm-scm-intrinsic lookup-bound)
 (define-scm<-scm-scm-intrinsic define!)
 (define-scm<-thread-intrinsic current-module)
 
