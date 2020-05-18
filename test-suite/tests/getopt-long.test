@@ -17,7 +17,7 @@
 ;;;; Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 
 ;;; Author:  Thien-Thi Nguyen <ttn@gnu.org> --- August 2001
-;;;          Dale Mellor <> --- April 2020
+;;;          Dale Mellor <guile-qf1qmg@rdmp.org> --- April 2020
 
 
 (use-modules (test-suite lib)
@@ -479,6 +479,43 @@
    (pass-if  "non-predicated -m -1"
              (test  "-d -1"   '((()) (dave . "-1"))))
 
+)
+
+
+(with-test-prefix  "negative numbers as short options"
+
+  (define  (test  args  expectation)
+    (A-TEST  args
+             `((zero (single-char #\0) (value #f))
+               (one  (single-char #\1) (value #t)
+                     (predicate ,string->number))
+               (two  (single-char #\2) (value optional)
+                     (predicate ,string->number))
+               (three (single-char #\3) (value #t)
+                      (predicate ,(λ (in) (not (string->number in)))))
+               (four (single-char #\4) (value optional)
+                     (predicate ,(λ (in) (not (string->number in)))))
+               )
+             expectation))
+
+  (pass-if  "-0 -2"  (test "-0 -2" '((()) (zero . #t) (two . #t))))
+  (pass-if  "-1 -2"  (test "-1 -2"  '((()) (one . "-2"))))
+  (pass-if  "-2 -3"  (test "-2 -3"  '((()) (two . "-3"))))
+  (pass-if  "-0 -4 test"  (test "-0 -4 test"
+                                '((()) (zero . #t) (four . "test"))))
+  (pass-if  "-4 -2"  (test "-4 -2"  '((()) (four . #t) (two . #t))))
+  (pass-if-fatal-exception  "-4 -3"  exception:option-must-have-arg
+                            (test "-4 -3" '((()))))
+  (pass-if  "-3a"   (test "-3a"  '((()) (three . "a"))))
+  (pass-if  "-13"   (test "-13"  '((()) (one . "3"))))
+  (pass-if  "-03a"  (test "-03a" '((()) (zero . #t) (three . "a"))))
+  (pass-if  "-023"  (test "-023" '((()) (zero . #t) (two . "3"))))
+  (pass-if  "-025"  (test "-025" '((()) (zero . #t) (two . "5"))))
+  (pass-if-fatal-exception  "-025a"  exception:no-such-option
+                            (test "-025a" '((()) (zero . #t) (two . "5"))))
+  (pass-if  "-02 a" (test "-02 a" '((() "a") (zero . #t) (two . #t))))
+  (pass-if-fatal-exception  "-02a"  exception:no-such-option
+                            (test "-02a" '((()))))
    )
 
 
