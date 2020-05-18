@@ -164,6 +164,14 @@
            (equal? (test3 "prg" "--bar" "--foo")
                    '((()) (foo . #t) (bar . #t))))
 
+  (pass-if "long option with equals and space"
+           (equal? (test3 "prg" "--foo=" "test")
+                   '((() "test")  (foo . #t))))
+
+  (pass-if "long option with equals and space, not allowed a value"
+           (equal? (test3 "prg" "--foo=" "test")
+                   '((() "test") (foo . #t))))
+  
   (pass-if "--="
            (equal? (test3 "prg" "--=")
                    '((() "--="))))
@@ -295,9 +303,40 @@
   (pass-if "normal 2" (test8 "-ab" "bang" "-c" "couth"))
   (pass-if "normal 3" (test8 "-ac" "couth" "-b" "bang"))
 
-  (pass-if-fatal-exception "bad ordering causes missing option"
-                     exception:option-must-have-arg
-                     (test8 "-abc" "couth" "bang"))
+
+  ;;;; Dale Mellor 2020-04-14
+  ;;;;
+  ;;;;  I disagree with this test: to my mind 'c' is 'b's argument, and
+  ;;;;  the other two arguments are non-options which get passed
+  ;;;;  through; there should not be an exception.
+
+  ;; (pass-if-fatal-exception "bad ordering causes missing option"
+  ;;                          exception:option-must-have-arg
+  ;;                          (test8 "-abc" "couth" "bang"))
+
+  (pass-if "clumped options with trailing mandatory value"
+           (A-TEST "-abc couth bang"
+                   '((apples    (single-char #\a))
+                     (blimps    (single-char #\b) (value #t))
+                     (catalexis (single-char #\c) (value #t)))
+                   '((() "couth" "bang") (apples . #t) (blimps . "c"))))
+  
+  (pass-if  "clumped options with trailing optional value"
+            (A-TEST "-abc couth bang"
+                    '((apples (single-char #\a))
+                      (blimps (single-char #\b)
+                              (value optional)))
+                    '((() "couth" "bang") (apples . #t) (blimps . "c"))))
+
+  (pass-if  "clumped options with trailing optional value"
+            (A-TEST "-abc couth bang"
+                    '((apples (single-char #\a))
+                      (blimps (single-char #\b)
+                              (value optional))
+                      (catalexis (single-char #\c)
+                                 (value #t)))
+                    '((() "bang")
+                      (apples . #t) (blimps . #t) (catalexis . "couth"))))
 
   )
 
@@ -346,6 +385,12 @@
                          #:stop-at-first-non-option #t)
             '((() "compile" "-Wformat" "eval.scm" "-o" "eval.go"))))
 
+  (pass-if "stop after option"
+    (equal? (getopt-long '("foo" "-a" "3" "4" "-b" "4")
+                         '((about (single-char #\a) (value #t))
+                           (breathe (single-char #\b) (value #t)))
+                         #:stop-at-first-non-option #t)
+            '((() "4" "-b" "4") (about . "3"))))
   )
 
 
@@ -370,6 +415,11 @@
     (test "--abby -- --ben dave --charles"
           '((() "--ben" "dave" "--charles") (abby . #t))     
           #:stop-at-first-non-option #t))
+
+  (pass-if "first non-option before marker"
+           (test "--abby dave --ben -- --charles"
+                 '((() "dave" "--ben" "--" "--charles")  (abby . #t))
+                 #:stop-at-first-non-option #t))
 
   (pass-if "double end marker"
     (test "--abby -- -- --ben"
@@ -431,14 +481,62 @@
   (pass-if "non-predicated -m-1"
     (test "-d-1" '((()) (dave . "-1"))))
 
+(pass-if-fatal-exception  "non-predicated --optional -1"
+                            exception:no-such-option
+                            (test  "--charles -1"  '((()) (charles . "-1"))))
+
+  (pass-if-fatal-exception  "non-predicated -o -1"
+                            exception:no-such-option
+                            (test  "-c -1"  '((()) (charles . "-1"))))
+
+  (pass-if  "non-predicated --mandatory=-1"
+    (test  "--dave=-1"   '((()) (dave . "-1"))))
+
   (pass-if "non-predicated --mandatory -1"
     (test "--dave -1" '((()) (dave . "-1"))))
-
+  
   (pass-if "non-predicated -m -1"
     (test "-d -1" '((()) (dave . "-1"))))
-
+  
   )
 
+
+
+(with-test-prefix  "negative numbers as short options"
+
+  (define  (test  args  expectation)
+    (A-TEST  args
+             `((zero (single-char #\0) (value #f))
+               (one  (single-char #\1) (value #t)
+                     (predicate ,string->number))
+               (two  (single-char #\2) (value optional)
+                     (predicate ,string->number))
+               (three (single-char #\3) (value #t)
+                      (predicate ,(λ (in) (not (string->number in)))))
+               (four (single-char #\4) (value optional)
+                     (predicate ,(λ (in) (not (string->number in)))))
+               )
+             expectation))
+
+  (pass-if  "-0 -2"  (test "-0 -2" '((()) (zero . #t) (two . #t))))
+  (pass-if  "-1 -2"  (test "-1 -2"  '((()) (one . "-2"))))
+  (pass-if  "-2 -3"  (test "-2 -3"  '((()) (two . "-3"))))
+  (pass-if  "-0 -4 test"  (test "-0 -4 test"
+                                '((()) (zero . #t) (four . "test"))))
+  (pass-if  "-4 -2"  (test "-4 -2"  '((()) (four . #t) (two . #t))))
+  (pass-if-fatal-exception  "-4 -3"  exception:option-must-have-arg
+                            (test "-4 -3" '((()))))
+  (pass-if  "-3a"   (test "-3a"  '((()) (three . "a"))))
+  (pass-if  "-13"   (test "-13"  '((()) (one . "3"))))
+  (pass-if  "-03a"  (test "-03a" '((()) (zero . #t) (three . "a"))))
+  (pass-if  "-023"  (test "-023" '((()) (zero . #t) (two . "3"))))
+  (pass-if  "-025"  (test "-025" '((()) (zero . #t) (two . "5"))))
+  (pass-if-fatal-exception  "-025a"  exception:no-such-option
+                            (test "-025a" '((()) (zero . #t) (two . "5"))))
+  (pass-if  "-02 a" (test "-02 a" '((() "a") (zero . #t) (two . #t))))
+  (pass-if-fatal-exception  "-02a"  exception:no-such-option
+                            (test "-02a" '((()))))
+   )
 
 
 (with-test-prefix "mcron backwards compatibility"
@@ -461,8 +559,14 @@
 
   (pass-if  "-s 8"  (test "-s 8 file"  '((() "file") (schedule . "8"))))
 
+  (pass-if  "-s file"
+            (test  "-s file"   '((() "file") (schedule . #t))))
+
   (pass-if  "-sd file"
     (test  "-sd file"   '((() "file") (daemon . #t) (schedule . #t))))
+
+  (pass-if  "-ds file"
+            (test  "-ds file"   '((() "file") (daemon . #t) (schedule . #t))))
 
   (pass-if  "--schedule=8"  (test  "--schedule=8 file"
                                    '((() "file") (schedule . "8"))))
