@@ -4,7 +4,7 @@
 @c   Free Software Foundation, Inc.
 @c See the file guile.texi for copying conditions.
 
-@node SRFI Support
+@node SRFI Support, R6RS Support, Command Line Processor, Guile Modules
 @section SRFI Support Modules
 @cindex SRFI
 

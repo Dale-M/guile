@@ -34,6 +34,7 @@ SCM_TESTS = tests/00-initial-env.test		\
 	    tests/c-api.test			\
 	    tests/chars.test			\
 	    tests/coding.test			\
+	    tests/command-line-processor.test	\
 	    tests/common-list.test		\
 	    tests/compiler.test			\
 	    tests/control.test			\

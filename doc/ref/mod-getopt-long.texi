@@ -4,7 +4,7 @@
 @c   Free Software Foundation, Inc.
 @c See the file guile.texi for copying conditions.
 
-@node getopt-long
+@node getopt-long, SRFI Support, Command Line Processor
 @section The (ice-9 getopt-long) Module
 
 The @code{(ice-9 getopt-long)} facility is designed to help parse

@@ -1,0 +1,240 @@
+@c -*-texinfo-*-
+@c This is part of the GNU Guile Reference Manual.
+@c Copyright (C)  2020
+@c   Free Software Foundation, Inc.
+@c See the file guile.texi for copying conditions.
+
+@node Command Line Processor, SRFI Support, Web, Guile Modules
+@section The (ice-9 command-line-processor) Module
+
+As its name implies, the @code{(ice-9 command-line-processor)} facility
+is supposed to be a one-stop shop for dealing with the command line.  It
+is inspired by the GNU libc's @code{argp} parser, and can be regarded as
+a high-level wrapper around the @xref{getopt-long} module.  It is
+designed to provide two specific features.
+
+@itemize @bullet
+@item
+Higher-level (easier to use) abstraction of the command-line user
+interface to this application, including available options and program
+meta-data.
+
+@item
+Automatic handling of @code{--help}, @code{--version} and @code{--usage}
+flags.  This means meeting GNU coding standards, and helping to
+‘regularize’ the output from these commands.
+@end itemize
+
+The module provides a single syntax extension to the guile language:
+@code{process-command-line}.
+
+@menu
+* Command Line Examples::     Examples of use.
+* Command Line Reference::    Detailed specification of the procedure.
+@end menu
+
+Also see @xref{Command Line Format} for precise details of allowed
+command-line formats.
+
+@node Command Line Examples, Command Line Reference, Command Line Processor, Command Line Processor
+@subsection  A Simple Example
+
+A (silly) program which takes two options, the second of which may
+provide a numerical value, might include the following lines.
+
+@lisp
+(use-modules (ice-9 command-line-processor))
+
+(process-command-line  (command-line)
+   application "my-app"
+   option (--option -o "the first option")
+   option (--test=3  -t  "another option" string->number))
+
+(when --option (do-something))
+(when --test (display --test) (newline))
+@end lisp
+
+@noindent
+and then the program could be called with command lines like
+
+@example
+$ ./my-app -o
+@end example
+
+@noindent
+or
+
+@example
+$ ./my-app --option -t 4 file-1 file-2
+@end example
+
+@subsection  GNU Mcron
+
+For realistic code, here is the first line of executable code GNU's
+@code{mcron} program has (the @code{%} tokens are filled in by the build
+system).
+
+@lisp
+(process-command-line  (command-line)
+       application   "mcron"
+       version       "%VERSION%"
+       usage         "[OPTIONS ...] [FILES ...]"
+       help-preamble
+  "Run unattended jobs according to instructions in the FILES... "
+  "(‘-’ for standard input), or use all the files in ~/.config/cron "
+  "(or the deprecated ~/.cron) with .guile or .vixie extensions.\n"
+  "Note that --daemon and --schedule are mutually exclusive."
+       option  (--daemon  -d  "run as a daemon process")
+       option  (--schedule=8  -s  string->number
+                      "display the next N (or 8) jobs that will be run,"
+                      "and then exit")
+       option  (--stdin=guile  short-i  (λ (in) (or (string=? in "guile")
+                                                    (string=? in "vixie")))
+                      "format of data passed as standard input or file "
+                      "arguments, 'guile' or 'vixie' (default guile)")
+       help-postamble
+  "Mandatory or optional arguments to long options are also mandatory or "
+  "optional for any corresponding short options."
+       bug-address "%PACKAGE_BUGREPORT%"
+       copyright   "2003, 2006, 2014, 2020  Free Software Foundation, Inc."
+       license     GPLv3)
+@end lisp
+
+@noindent
+after which there are four new variable bindings in the present
+namespace: literally, @code{--daemon}, @code{--stdin}, @code{--schedule}
+and @code{--!} (the latter holds all the command-line arguments that did
+not partake in option processing) whose values depend on the specific
+command-line options the end user furnished... except that if the user
+had typed
+
+@example
+$ mcron --help
+@end example
+
+@noindent
+they would be greeted with
+
+@example
+Usage: mcron [OPTIONS ...] [FILES ...]
+Run unattended jobs according to instructions in the FILES... 
+(`-' for standard input), or use all the files in ~/.config/cron 
+(or the deprecated ~/.cron) with .guile or .vixie extensions.
+
+Note that --daemon and --schedule are mutually exclusive.
+
+  -d,    --daemon        run as a daemon process
+  -s[N], --schedule[=N]  display the next N (or 8) jobs that will be run,
+                           and then exit
+  -i[N], --stdin[=N]     format of data passed as standard input or file 
+                           arguments, 'guile' or 'vixie' (default guile)
+  -h,    --help          display this help and exit
+  -V,    --version       output version information and exit
+  -u,    --usage         show brief usage summary
+
+Mandatory or optional arguments to long options are also mandatory or 
+optional for any corresponding short options.
+
+Send bug reports to bug-mcron@@gnu.org.
+@end example
+
+@noindent
+and the program would immediately have exited.
+
+@node Command Line Reference,  , Command Line Examples, Command Line Processor
+@subsection  process-command-line
+
+@deffn {Scheme Procedure}  process-command-line  COMMAND-LINE  SPECIFICATION
+Process the @var{COMMAND-LINE} according to the application
+@var{SPECIFICATION}.
+
+@var{COMMAND-LINE} is a list of strings, such as that returned from the
+core @code{(command-line)} function: the first string is the name of the
+command being run, and the rest are the space-separated tokens that
+followed the command on the command line.
+
+@var{SPECIFICATION} is a form holding a space-separated mix of selection
+words followed by their respective declarations.  The selection words
+are @code{application}, @code{author}, @code{bug-address},
+@code{copyright}, @code{help-preamble}, @code{help-postamble},
+@code{license}, @code{option}, @code{usage} and @code{version}, and can
+appear in any order.
+
+@table @asis
+@item @code{application}
+should be followed by a string: the name of the application with
+possibly the package name in parentheses afterwards.  This may appear
+zero or one times, but ideally should be present.
+@item @code{author}
+should be followed by a string giving the name of one of the packageʼs
+authors.  This selection word can be repeated as many times as necessary
+to provide the names of all authors.
+@item @code{bug-address}
+should be followed by a string giving the URL of a contact-point for
+sending bug reports, such as an e-mail address or web address of
+bug-tracking system interface.  This can appear zero or one times.
+@item @code{copyright}
+should be followed by a string containing a list of years and an entity
+to whom the copyright is assigned.  This may be repeated to list other
+assignees.
+@item @code{help-preamble}
+should be followed by a number of strings which make up a short
+paragraph of text displayed before a full list of the available program
+options.
+@item @code{help-postamble}
+like the preamble, this is followed by strings which make up a paragraph
+of text, shown after the list of options.
+@item @code{license}
+can be followed by one of the words ‘GPLv3’ [this is currently the only
+standard choice implemented], or else a string which briefly gives out
+the terms of the license.  Can appear zero or one times.
+@item @code{option}
+is followed by an option declaration, described below.  You can specify
+any number of options.
+@item @code{usage}
+is followed by a string describing the usage of the application on one
+line.  This can appear zero or one times, but ideally should be present.
+@item @code{version}
+is followed by a string providing the current version number of this
+program.  This item may appear zero or one times.
+@end table
+
+The ‘option’ declaration is followed by another form bracketed by
+parentheses and holding a space-separated mix of declarations (order
+irrelevant).
+
+@itemize @bullet
+@item
+A word beginning with two hyphens, an optional exclamation point,
+alphabetic letters (intermixed with digits, underscore and hyphens), an
+optional equals sign, and an optional further word.  There must be
+exactly one of these, and that determines the long name of the option.
+An exclamation point indicates that the option MUST appear on the
+command line, an equals indicates that the option MUST have a value
+unless it is followed in the specification by a value, in which case the
+value on the command-line is optional and the one in the specification
+will be taken as the default when not given on the command line.
+@item
+A word comprised of one hyphen and one letter.  There can be exactly
+zero or one of these, and it declares that the option has this short
+form available on the command-line.  As a very special exception: if you
+want to use @code{-i} as an option, it must be specified with the
+identifier @code{short-i} (a naked @emph{-i} is read as a complex
+number); ditto @code{short-I} for @code{-I}.
+@item
+A number of strings which are catenated together to provide a short,
+succinct description of the option.  These strings should be
+approximately half the width of a page, i.e. about 40 characters.
+@item
+A function which will be used as a predicate to decide if a value is
+allowable for this option.  There should be zero or one of these.
+@end itemize
+
+For the precise presentation of options on the command-line, the reader
+should refer to the @xref{Command Line Format}, part of the description
+of the @xref{getopt-long} module, which underlies the present one.
+
+@end deffn
+
+
+@include mod-getopt-long.texi
