@@ -1,6 +1,6 @@
 ;;; Continuation-passing style (CPS) intermediate language (IL)
 
-;; Copyright (C) 2013-2019 Free Software Foundation, Inc.
+;; Copyright (C) 2013-2020 Free Software Foundation, Inc.
 
 ;;;; This library is free software; you can redistribute it and/or
 ;;;; modify it under the terms of the GNU Lesser General Public
@@ -25,19 +25,21 @@
 (define-module (language cps cse)
   #:use-module (ice-9 match)
   #:use-module (srfi srfi-1)
+  #:use-module (srfi srfi-9)
   #:use-module (srfi srfi-11)
   #:use-module (language cps)
   #:use-module (language cps utils)
   #:use-module (language cps effects-analysis)
   #:use-module (language cps intmap)
   #:use-module (language cps intset)
+  #:use-module (language cps renumber)
   #:export (eliminate-common-subexpressions))
 
-(define (compute-available-expressions succs kfun effects)
+(define (compute-available-expressions succs kfun clobbers)
   "Compute and return a map of LABEL->ANCESTOR..., where ANCESTOR... is
 an intset containing ancestor labels whose value is available at LABEL."
   (let ((init (intmap-map (lambda (label succs) #f) succs))
-        (kill (compute-clobber-map effects))
+        (kill clobbers)
         (gen (intmap-map (lambda (label succs) (intset label)) succs))
         (subtract (lambda (in-1 kill-1)
                     (if in-1
@@ -77,18 +79,18 @@ an intset containing ancestor labels whose value is available at LABEL."
     ((f worklist seed)
      ((make-worklist-folder* seed) f worklist seed))))
 
+(define-syntax-rule (true-idx idx) (ash idx 1))
+(define-syntax-rule (false-idx idx) (1+ (ash idx 1)))
+
 (define (compute-truthy-expressions conts kfun)
   "Compute a \"truth map\", indicating which expressions can be shown to
-be true and/or false at each label in the function starting at KFUN..
+be true and/or false at each label in the function starting at KFUN.
 Returns an intmap of intsets.  The even elements of the intset indicate
 labels that may be true, and the odd ones indicate those that may be
 false.  It could be that both true and false proofs are available."
-  (define (true-idx label) (ash label 1))
-  (define (false-idx label) (1+ (ash label 1)))
-
   (define (propagate boolv succ out)
     (let* ((in (intmap-ref boolv succ (lambda (_) #f)))
-           (in* (if in (intset-intersect in out) out)))
+           (in* (if in (intset-union in out) out)))
       (if (eq? in in*)
           (values '() boolv)
           (values (list succ)
@@ -132,288 +134,503 @@ false.  It could be that both true and false proofs are available."
              (propagate1 kbody)))
         (($ $ktail) (propagate0)))))
 
-  (intset-fold
-   (lambda (kfun boolv)
-     (worklist-fold* visit-cont
-                     (intset kfun)
-                     (intmap-add boolv kfun empty-intset)))
-   (intmap-keys (compute-reachable-functions conts kfun))
-   empty-intmap))
+  (worklist-fold* visit-cont
+                  (intset kfun)
+                  (intmap-add empty-intmap kfun empty-intset)))
 
-(define (intset-map f set)
+(define-record-type <analysis>
+  (make-analysis effects clobbers preds avail truthy-labels)
+  analysis?
+  (effects analysis-effects)
+  (clobbers analysis-clobbers)
+  (preds analysis-preds)
+  (avail analysis-avail)
+  (truthy-labels analysis-truthy-labels))
+
+;; When we determine that we can replace an expression with
+;; already-bound variables, we change the expression to a $values.  At
+;; its continuation, if it turns out that the $values expression is the
+;; only predecessor, we elide the predecessor, to make redundant branch
+;; folding easier.  Ideally, elision results in redundant branches
+;; having multiple predecessors which already have values for the
+;; branch.
+;;
+;; We could avoid elision, and instead search backwards when we get to a
+;; branch that we'd like to elide.  However it's gnarly: branch elisions
+;; reconfigure the control-flow graph, and thus affect the avail /
+;; truthy maps.  If we forwarded such a distant predecessor, if there
+;; were no intermediate definitions, we'd have to replay the flow
+;; analysis from far away.  Maybe it's possible but it's not obvious.
+;;
+;; The elision mechanism is to rewrite predecessors to continue to the
+;; successor.  We could have instead replaced the predecessor with the
+;; body of the successor, but that would invalidate the values of the
+;; avail / truthy maps, as well as the clobber sets.
+;;
+;; We can't always elide the predecessor though.  If any of the
+;; predecessor's predecessors is a back-edge, it hasn't been
+;; residualized yet and so we can't rewrite it.  This is an
+;; implementation limitation.
+;;
+(define (forward-cont cont from to)
+  (define (rename k) (if (eqv? k from) to k))
+  (rewrite-cont cont
+    (($ $kargs names vals ($ $continue k src exp))
+     ($kargs names vals ($continue (rename k) src ,exp)))
+    (($ $kargs names vals ($ $branch kf kt src op param args))
+     ($kargs names vals ($branch (rename kf) (rename kt) src op param args)))
+    (($ $kargs names vals ($ $prompt k kh src escape? tag))
+     ($kargs names vals ($prompt (rename k) (rename kh) src escape? tag)))
+    (($ $kreceive ($ $arity req () rest () #f) kbody)
+     ($kreceive req rest (rename kbody)))
+    (($ $kclause arity kbody kalternate)
+     ;; Can only be a body continuation.
+     ($kclause ,arity (rename kbody) kalternate))))
+
+(define (elide-predecessor label pred out analysis)
+  (match analysis
+    (($ <analysis> effects clobbers preds avail truthy-labels)
+     (let ((pred-preds (intmap-ref preds pred)))
+       (and
+        ;; Don't elide predecessors that are the targets of back-edges.
+        (< (intset-prev pred-preds) pred)
+        (cons
+         (intset-fold
+          (lambda (pred-pred out)
+            (define (rename k) (if (eqv? k pred) label k))
+            (intmap-replace!
+             out pred-pred
+             (forward-cont (intmap-ref out pred-pred) pred label)))
+          pred-preds
+          (intmap-remove out pred))
+         (make-analysis effects
+                        clobbers
+                        (intmap-add (intmap-add preds label pred intset-remove)
+                                    label pred-preds intset-union)
+                        avail
+                        truthy-labels)))))))
+
+(define (prune-branch analysis pred succ)
+  (match analysis
+    (($ <analysis> effects clobbers preds avail truthy-labels)
+     (make-analysis effects
+                    clobbers
+                    (intmap-add preds succ pred intset-remove)
+                    avail
+                    truthy-labels))))
+
+(define (forward-branch analysis pred old-succ new-succ)
+  (match analysis
+    (($ <analysis> effects clobbers preds avail truthy-labels)
+     (make-analysis effects
+                    clobbers
+                    (let ((preds (intmap-add preds old-succ pred
+                                             intset-remove)))
+                      (intmap-add preds new-succ pred intset-add))
+                    avail
+                    truthy-labels))))
+
+(define (prune-successors analysis pred succs)
+  (intset-fold (lambda (succ analysis)
+                 (prune-branch analysis pred succ))
+               succs analysis))
+
+(define (compute-avail-and-bool-edge analysis pred succ out)
+  (match analysis
+    (($ <analysis> effects clobbers preds avail truthy-labels)
+     (let ((avail (intmap-ref avail pred))
+           (kill  (intmap-ref clobbers pred))
+           (bool  (intmap-ref truthy-labels pred)))
+       (values (intset-add (intset-subtract avail kill) pred)
+               (match (and (< pred succ) (intmap-ref out pred))
+                 (($ $kargs _ _ ($ $branch kf kt))
+                  (define (maybe-add bool k idx)
+                    (if (eqv? k succ) (intset-add bool idx) bool))
+                  (maybe-add (maybe-add bool kf (false-idx pred))
+                             kt (true-idx pred)))
+                 (_ bool)))))))
+
+(define (propagate-analysis analysis label out)
+  (match analysis
+    (($ <analysis> effects clobbers preds avail truthy-labels)
+     (call-with-values
+         (lambda ()
+           (intset-fold
+            (lambda (pred avail-in bool-in)
+              (call-with-values
+                  (lambda ()
+                    (compute-avail-and-bool-edge analysis pred label out))
+                (lambda (avail-in* bool-in*)
+                  (values (if avail-in
+                              (intset-intersect avail-in avail-in*)
+                              avail-in*)
+                          (intset-union bool-in bool-in*)))))
+            (intmap-ref preds label) #f empty-intset))
+       (lambda (avail-in bool-in)
+         (make-analysis effects clobbers preds
+                        (intmap-replace avail label avail-in)
+                        (intmap-replace truthy-labels label bool-in)))))))
+
+(define (term-successors term)
+  (match term
+    (($ $continue k) (intset k))
+    (($ $branch kf kt) (intset kf kt))
+    (($ $prompt k kh) (intset k kh))
+    (($ $throw) empty-intset)))
+
+(define (intmap-select map keys)
   (persistent-intmap
-   (intset-fold (lambda (i out) (intmap-add! out i (f i)))
-                set
-                empty-intmap)))
+   (intmap-fold (lambda (k v out)
+                  (if (intset-ref keys k)
+                      (intmap-add! out k v)
+                      out))
+                map empty-intmap)))
 
-;; Returns a map of label-idx -> (var-idx ...) indicating the variables
-;; defined by a given labelled expression.
-(define (compute-defs conts kfun)
-  (intset-map (lambda (label)
-                (match (intmap-ref conts label)
-                  (($ $kfun src meta self tail clause)
-                   (if self (list self) '()))
-                  (($ $kclause arity body alt)
-                   (match (intmap-ref conts body)
-                     (($ $kargs names vars) vars)))
-                  (($ $kreceive arity kargs)
-                   (match (intmap-ref conts kargs)
-                     (($ $kargs names vars) vars)))
-                  (($ $ktail)
-                   '())
-                  (($ $kargs names vars term)
-                   (match term
-                     (($ $continue k)
-                      (match (intmap-ref conts k)
-                        (($ $kargs names vars) vars)
-                        (_ #f)))
-                     (($ $branch)
-                      '())
-                     ((or ($ $prompt) ($ $throw))
-                      #f)))))
-               (compute-function-body conts kfun)))
+(define (make-equivalent-expression-table)
+  ;; Table associating expressions with equivalent variables, indexed by
+  ;; the label that defines them.
+  (make-hash-table))
+(define (add-equivalent-expression! table key label vars)
+  (let ((equiv (hash-ref table key empty-intmap)))
+    (define (allow-equal old new)
+      (if (equal? old new)
+          old
+          (error "bad equiv var update" label old new)))
+    (hash-set! table key
+               (intmap-add equiv label vars allow-equal))))
+(define (lookup-equivalent-expressions table key avail)
+  (match (hash-ref table key)
+    (#f empty-intmap)
+    (equiv (intmap-select equiv avail))))
 
-(define (compute-singly-referenced succs)
-  (define (visit label succs single multiple)
-    (intset-fold (lambda (label single multiple)
-                   (if (intset-ref single label)
-                       (values single (intset-add! multiple label))
-                       (values (intset-add! single label) multiple)))
-                 succs single multiple))
-  (call-with-values (lambda ()
-                      (intmap-fold visit succs empty-intset empty-intset))
-    (lambda (single multiple)
-      (intset-subtract (persistent-intset single)
-                       (persistent-intset multiple)))))
+;; return #(taken not-taken), or #f if can't decide.
+(define (fold-branch table key kf kt avail bool)
+  (let ((equiv (lookup-equivalent-expressions table key avail)))
+    (let lp ((candidate (intmap-prev equiv)))
+      (match candidate
+        (#f #f)
+        (_ (let ((t (intset-ref bool (true-idx candidate)))
+                 (f (intset-ref bool (false-idx candidate))))
+             (if (eqv? t f)
+                 (lp (intmap-prev equiv (1- candidate)))
+                 (if t
+                     (vector kt kf)
+                     (vector kf kt)))))))))
 
-(define (intmap-select map set)
-  (intset->intmap (lambda (label) (intmap-ref map label)) set))
+(define (eliminate-common-subexpressions-in-fun kfun conts out substs)
+  (define equivalent-expressions (make-equivalent-expression-table))
+  (define (subst-var substs var)
+    (intmap-ref substs var (lambda (var) var)))
+  (define (subst-vars substs vars)
+    (let lp ((vars vars))
+      (match vars
+        (() '())
+        ((var . vars) (cons (subst-var substs var) (lp vars))))))
 
-(define (compute-equivalent-subexpressions conts kfun)
-  (define (visit-fun kfun body equiv-labels var-substs)
-    (let* ((conts (intmap-select conts body))
-           (effects (synthesize-definition-effects (compute-effects conts)))
-           (succs (compute-successors conts kfun))
-           (singly-referenced (compute-singly-referenced succs))
-           (avail (compute-available-expressions succs kfun effects))
-           (defs (compute-defs conts kfun))
-           (equiv-set (make-hash-table)))
-      (define (subst-var var-substs var)
-        (intmap-ref var-substs var (lambda (var) var)))
-      (define (subst-vars var-substs vars)
-        (let lp ((vars vars))
-          (match vars
-            (() '())
-            ((var . vars) (cons (subst-var var-substs var) (lp vars))))))
-
-      (define (compute-term-key var-substs term)
-        (match term
-          (($ $continue k src exp)
-           (match exp
-             (($ $const val) (cons 'const val))
-             (($ $prim name) (cons 'prim name))
-             (($ $fun body) #f)
-             (($ $rec names syms funs) #f)
-             (($ $const-fun label) #f)
-             (($ $code label) (cons 'code label))
-             (($ $call proc args) #f)
-             (($ $callk k proc args) #f)
-             (($ $primcall name param args)
-              (cons* name param (subst-vars var-substs args)))
-             (($ $values args) #f)))
-          (($ $branch kf kt src op param args)
-           (cons* op param (subst-vars var-substs args)))
-          ((or ($ $prompt) ($ $throw)) #f)))
-
-      (define (add-auxiliary-definitions! label defs var-substs term-key)
-        (let ((defs (and defs (subst-vars var-substs defs))))
-          (define (add-def! aux-key var)
-            (let ((equiv (hash-ref equiv-set aux-key '())))
-              (hash-set! equiv-set aux-key
-                         (acons label (list var) equiv))))
-          (define-syntax add-definitions
-            (syntax-rules (<-)
-              ((add-definitions)
-               #f)
-              ((add-definitions
-                ((def <- op arg ...) (aux <- op* arg* ...) ...)
-                . clauses)
-               (match term-key
-                 (('op arg ...)
-                  (match defs
-                    (#f
-                     ;; If the successor is a control-flow join, don't
-                     ;; pretend to know the values of its defs.
-                     #f)
-                    ((def) (add-def! (list 'op* arg* ...) aux) ...)))
-                 (_ (add-definitions . clauses))))
-              ((add-definitions
-                ((op arg ...) (aux <- op* arg* ...) ...)
-                . clauses)
-               (match term-key
-                 (('op arg ...)
-                  (add-def! (list 'op* arg* ...) aux) ...)
-                 (_ (add-definitions . clauses))))))
-          (add-definitions
-           ((scm-set! p s i x)               (x <- scm-ref p s i))
-           ((scm-set!/tag p s x)             (x <- scm-ref/tag p s))
-           ((scm-set!/immediate p s x)       (x <- scm-ref/immediate p s))
-           ((word-set! p s i x)              (x <- word-ref p s i))
-           ((word-set!/immediate p s x)      (x <- word-ref/immediate p s))
-           ((pointer-set!/immediate p s x)   (x <- pointer-ref/immediate p s))
-
-           ((u <- scm->f64 #f s)             (s <- f64->scm #f u))
-           ((s <- f64->scm #f u)             (u <- scm->f64 #f s))
-           ((u <- scm->u64 #f s)             (s <- u64->scm #f u))
-           ((s <- u64->scm #f u)             (u <- scm->u64 #f s)
-                                             (u <- scm->u64/truncate #f s))
-           ((s <- u64->scm/unlikely #f u)    (u <- scm->u64 #f s)
-                                             (u <- scm->u64/truncate #f s))
-           ((u <- scm->s64 #f s)             (s <- s64->scm #f u))
-           ((s <- s64->scm #f u)             (u <- scm->s64 #f s))
-           ((s <- s64->scm/unlikely #f u)    (u <- scm->s64 #f s))
-           ((u <- untag-fixnum #f s)         (s <- s64->scm #f u)
-                                             (s <- tag-fixnum #f u))
-           ;; NB: These definitions rely on U having top 2 bits equal to
-           ;; 3rd (sign) bit.
-           ((s <- tag-fixnum #f u)           (u <- scm->s64 #f s)
-                                             (u <- untag-fixnum #f s))
-           ((s <- u64->s64 #f u)             (u <- s64->u64 #f s))
-           ((u <- s64->u64 #f s)             (s <- u64->s64 #f u))
-
-           ((u <- untag-char #f s)           (s <- tag-char #f u))
-           ((s <- tag-char #f u)             (u <- untag-char #f s)))))
-
-      (define (visit-label label equiv-labels var-substs)
-        (define (term-defs term)
-          (match term
-            (($ $continue k)
-             (and (intset-ref singly-referenced k)
-                  (intmap-ref defs label)))
-            (($ $branch) '())))
-        (match (intmap-ref conts label)
-          (($ $kargs names vars term)
-           (match (compute-term-key var-substs term)
-             (#f (values equiv-labels var-substs))
-             (term-key
-              (let* ((equiv (hash-ref equiv-set term-key '()))
-                     (fx (intmap-ref effects label))
-                     (avail (intmap-ref avail label)))
-                (define (finish equiv-labels var-substs defs)
-                  ;; If this expression defines auxiliary definitions,
-                  ;; as `cons' does for the results of `car' and `cdr',
-                  ;; define those.  Do so after finding equivalent
-                  ;; expressions, so that we can take advantage of
-                  ;; subst'd output vars.
-                  (add-auxiliary-definitions! label defs var-substs term-key)
-                  (values equiv-labels var-substs))
-                (let lp ((candidates equiv))
-                  (match candidates
-                    (()
-                     ;; No matching expressions.  Add our expression
-                     ;; to the equivalence set, if appropriate.  Note
-                     ;; that expressions that allocate a fresh object
-                     ;; or change the current fluid environment can't
-                     ;; be eliminated by CSE (though DCE might do it
-                     ;; if the value proves to be unused, in the
-                     ;; allocation case).
-                     (let ((defs (term-defs term)))
-                       (when (and defs
-                                  (not (causes-effect? fx &allocation))
-                                  (not (effect-clobbers? fx (&read-object &fluid))))
-                         (hash-set! equiv-set term-key (acons label defs equiv)))
-                       (finish equiv-labels var-substs defs)))
-                    (((and head (candidate . vars)) . candidates)
-                     (cond
-                      ((not (intset-ref avail candidate))
-                       ;; This expression isn't available here; try
-                       ;; the next one.
-                       (lp candidates))
-                      (else
-                       ;; Yay, a match.  Mark expression as equivalent.  If
-                       ;; we provide the definitions for the successor, mark
-                       ;; the vars for substitution.
-                       (let ((defs (term-defs term)))
-                         (finish (intmap-add equiv-labels label head)
-                                 (if defs
-                                     (fold (lambda (def var var-substs)
-                                             (intmap-add var-substs def var))
-                                           var-substs defs vars)
-                                     var-substs)
-                                 defs)))))))))))
-          (_ (values equiv-labels var-substs))))
-
-      ;; Traverse the labels in fun in reverse post-order, which will
-      ;; visit definitions before uses first.
-      (fold2 visit-label
-             (compute-reverse-post-order succs kfun)
-             equiv-labels
-             var-substs)))
-
-  (intmap-fold visit-fun
-               (compute-reachable-functions conts kfun)
-               empty-intmap
-               empty-intmap))
-
-(define (apply-cse conts equiv-labels var-substs truthy-labels)
-  (define (true-idx idx) (ash idx 1))
-  (define (false-idx idx) (1+ (ash idx 1)))
-
-  (define (subst-var var)
-    (intmap-ref var-substs var (lambda (var) var)))
-
-  (define (visit-exp exp)
-    (rewrite-exp exp
-      ((or ($ $const) ($ $prim) ($ $fun) ($ $rec) ($ $const-fun) ($ $code)) ,exp)
-      (($ $call proc args)
-       ($call (subst-var proc) ,(map subst-var args)))
-      (($ $callk k proc args)
-       ($callk k (and proc (subst-var proc)) ,(map subst-var args)))
-      (($ $primcall name param args)
-       ($primcall name param ,(map subst-var args)))
-      (($ $values args)
-       ($values ,(map subst-var args)))))
-
-  (define (visit-term label term)
+  (define (compute-branch-key branch)
+    (match branch
+      (($ $branch kf kt src op param args)  (cons* op param args))))
+  (define (compute-expr-key expr)
+    (match expr
+      (($ $const val)                       (cons 'const val))
+      (($ $prim name)                       (cons 'prim name))
+      (($ $fun body)                        #f)
+      (($ $rec names syms funs)             #f)
+      (($ $const-fun label)                 #f)
+      (($ $code label)                      (cons 'code label))
+      (($ $call proc args)                  #f)
+      (($ $callk k proc args)               #f)
+      (($ $primcall name param args)        (cons* name param args))
+      (($ $values args)                     #f)))
+  (define (compute-term-key term)
     (match term
-      (($ $branch kf kt src op param args)
-       (match (intmap-ref equiv-labels label (lambda (_) #f))
-         ((equiv) ; A branch defines no values.
-          (let* ((bool (intmap-ref truthy-labels label))
-                 (t (intset-ref bool (true-idx equiv)))
-                 (f (intset-ref bool (false-idx equiv))))
-            (if (eqv? t f)
-                (build-term
-                  ($branch kf kt src op param ,(map subst-var args)))
-                (build-term
-                  ($continue (if t kt kf) src ($values ()))))))
-         (#f
-          (build-term
-            ($branch kf kt src op param ,(map subst-var args))))))
-      (($ $continue k src exp)
-       (match (intmap-ref equiv-labels label (lambda (_) #f))
-         ((equiv . vars)
-          (build-term ($continue k src ($values vars))))
-         (#f
-          (build-term
-            ($continue k src ,(visit-exp exp))))))
-      (($ $prompt k kh src escape? tag)
-       (build-term
-         ($prompt k kh src escape? (subst-var tag))))
-      (($ $throw src op param args)
-       (build-term
-         ($throw src op param ,(map subst-var args))))))
+      (($ $continue k src exp)              (compute-expr-key exp))
+      (($ $branch)                          (compute-branch-key term))
+      (($ $prompt)                          #f)
+      (($ $throw)                           #f)))
 
-  (intmap-map
-   (lambda (label cont)
-     (rewrite-cont cont
-       (($ $kargs names vars term)
-        ($kargs names vars ,(visit-term label term)))
-       (_ ,cont)))
-   conts))
+  (define (add-auxiliary-definitions! label defs substs term-key)
+    (define (add-def! aux-key var)
+      (add-equivalent-expression! equivalent-expressions aux-key label
+                                  (list var)))
+    (define-syntax add-definitions
+      (syntax-rules (<-)
+        ((add-definitions)
+         #f)
+        ((add-definitions
+          ((def <- op arg ...) (aux <- op* arg* ...) ...)
+          . clauses)
+         (match term-key
+           (('op arg ...)
+            (match defs
+              (#f
+               ;; If the successor is a control-flow join, don't
+               ;; pretend to know the values of its defs.
+               #f)
+              ((def) (add-def! (list 'op* arg* ...) aux) ...)))
+           (_ (add-definitions . clauses))))
+        ((add-definitions
+          ((op arg ...) (aux <- op* arg* ...) ...)
+          . clauses)
+         (match term-key
+           (('op arg ...)
+            (add-def! (list 'op* arg* ...) aux) ...)
+           (_ (add-definitions . clauses))))))
+    (add-definitions
+     ((scm-set! p s i x)               (x <- scm-ref p s i))
+     ((scm-set!/tag p s x)             (x <- scm-ref/tag p s))
+     ((scm-set!/immediate p s x)       (x <- scm-ref/immediate p s))
+     ((word-set! p s i x)              (x <- word-ref p s i))
+     ((word-set!/immediate p s x)      (x <- word-ref/immediate p s))
+     ((pointer-set!/immediate p s x)   (x <- pointer-ref/immediate p s))
+
+     ((u <- scm->f64 #f s)             (s <- f64->scm #f u))
+     ((s <- f64->scm #f u)             (u <- scm->f64 #f s))
+     ((u <- scm->u64 #f s)             (s <- u64->scm #f u))
+     ((s <- u64->scm #f u)             (u <- scm->u64 #f s)
+      (u <- scm->u64/truncate #f s))
+     ((s <- u64->scm/unlikely #f u)    (u <- scm->u64 #f s)
+      (u <- scm->u64/truncate #f s))
+     ((u <- scm->s64 #f s)             (s <- s64->scm #f u))
+     ((s <- s64->scm #f u)             (u <- scm->s64 #f s))
+     ((s <- s64->scm/unlikely #f u)    (u <- scm->s64 #f s))
+     ((u <- untag-fixnum #f s)         (s <- s64->scm #f u)
+      (s <- tag-fixnum #f u))
+     ;; NB: These definitions rely on U having top 2 bits equal to
+     ;; 3rd (sign) bit.
+     ((s <- tag-fixnum #f u)           (u <- scm->s64 #f s)
+      (u <- untag-fixnum #f s))
+     ((s <- u64->s64 #f u)             (u <- s64->u64 #f s))
+     ((u <- s64->u64 #f s)             (s <- u64->s64 #f u))
+
+     ((u <- untag-char #f s)           (s <- tag-char #f u))
+     ((s <- tag-char #f u)             (u <- untag-char #f s))))
+
+  (define (rename-uses term substs)
+    (define (subst-var var)
+      (intmap-ref substs var (lambda (var) var)))
+    (define (rename-exp exp)
+      (rewrite-exp exp
+        ((or ($ $const) ($ $prim) ($ $fun) ($ $rec) ($ $const-fun) ($ $code))
+         ,exp)
+        (($ $call proc args)
+         ($call (subst-var proc) ,(map subst-var args)))
+        (($ $callk k proc args)
+         ($callk k (and proc (subst-var proc)) ,(map subst-var args)))
+        (($ $primcall name param args)
+         ($primcall name param ,(map subst-var args)))
+        (($ $values args)
+         ($values ,(map subst-var args)))))
+    (rewrite-term term
+      (($ $branch kf kt src op param args)
+       ($branch kf kt src op param ,(map subst-var args)))
+      (($ $continue k src exp)
+       ($continue k src ,(rename-exp exp)))
+      (($ $prompt k kh src escape? tag)
+       ($prompt k kh src escape? (subst-var tag)))
+      (($ $throw src op param args)
+       ($throw src op param ,(map subst-var args)))))
+
+  (define (visit-exp label exp analysis)
+    (define (residualize) exp)
+    (define (forward vals) (build-exp ($values vals)))
+    (match (compute-expr-key exp)
+      (#f (residualize))
+      (key
+       (match analysis
+         (($ <analysis> effects clobbers preds avail truthy-labels)
+          (match (lookup-equivalent-expressions equivalent-expressions
+                                                key (intmap-ref avail label))
+            ((? (lambda (x) (eq? x empty-intmap)))
+             (residualize))
+            (equiv
+             (forward (intmap-ref equiv (intmap-next equiv))))))))))
+
+  (define (maybe-forward-branch-predecessor label pred key kf kt out analysis)
+    (cond
+     ((<= label pred)
+      ;; A backwards branch; punt.
+      (values out analysis))
+     (else
+      (call-with-values (lambda ()
+                          (compute-avail-and-bool-edge analysis pred label out))
+        (lambda (pred-avail pred-bool)
+          (match (fold-branch equivalent-expressions key kf kt
+                              pred-avail pred-bool)
+            (#(taken not-taken)
+             (values (intmap-replace!
+                      out pred
+                      (forward-cont (intmap-ref out pred) label taken))
+                     (forward-branch analysis pred label taken)))
+            (#f
+             (values out analysis))))))))
+
+  (define (simplify-branch-predecessors label term out analysis)
+    ;; if any predecessor's truthy-edge folds the branch, forward the
+    ;; precedecessor.  may cause branch to become dead, or cause
+    ;; remaining predecessor to eliminate.
+    (match term
+      (($ $branch kf kt)
+       (let ((key (compute-branch-key term)))
+         (match analysis
+           (($ <analysis> effects clobbers preds avail truthy-labels)
+            (call-with-values
+                (lambda ()
+                  (intset-fold
+                   (lambda (pred out analysis)
+                     (maybe-forward-branch-predecessor label pred
+                                                       key kf kt out analysis))
+                   (intmap-ref preds label) out analysis))
+              (lambda (out* analysis*)
+                (if (eq? analysis analysis*)
+                    #f
+                    (cons out* analysis*))))))))))
+
+  (define (visit-branch label term analysis)
+    (match term
+      (($ $branch kf kt src)
+       (match analysis
+         (($ <analysis> effects clobbers preds avail truthy-labels)
+          (let ((key (compute-branch-key term))
+                (avail (intmap-ref avail label))
+                (bool (intmap-ref truthy-labels label)))
+            (match (fold-branch equivalent-expressions key kf kt avail bool)
+              (#(taken not-taken)
+               (values (build-term ($continue taken src ($values ())))
+                       (prune-branch analysis label not-taken)))
+              (#f
+               (values term analysis)))))))))
+
+  (define (visit-term label names vars term out substs analysis)
+    (let ((term (rename-uses term substs))
+          (analysis (propagate-analysis analysis label out)))
+      (match term
+        (($ $branch)
+         ;; Can only forward predecessors if this continuation binds no
+         ;; values.
+         (match (and (null? vars)
+                     (simplify-branch-predecessors label term out analysis))
+           (#f
+            (call-with-values (lambda ()
+                                (visit-branch label term analysis))
+              (lambda (term analysis)
+                (values (intmap-add! out label
+                                     (build-cont ($kargs names vars ,term)))
+                        substs
+                        analysis))))
+           ((out . analysis)
+            ;; Recurse.
+            (visit-label label (build-cont ($kargs names vars ,term))
+                         out substs analysis))))
+        (($ $continue k src exp)
+         (values (intmap-add! out label
+                              (build-cont
+                                ($kargs names vars
+                                  ($continue k src
+                                    ,(visit-exp label exp analysis)))))
+                 substs
+                 analysis))
+        ((or ($ $prompt) ($ $throw))
+         (values (intmap-add! out label (build-cont ($kargs names vars ,term)))
+                 substs
+                 analysis)))))
+
+  (define (visit-label label cont out substs analysis)
+    (match cont
+      (($ $kargs names vars term)
+       (define (visit-term-normally)
+         (visit-term label names vars term out substs analysis))
+       (match analysis
+         (($ <analysis> effects clobbers preds avail truthy-labels)
+          (let ((preds (intmap-ref preds label)))
+            (cond
+             ((eq? preds empty-intset)
+              ;; Branch folding made this term unreachable.  Prune from
+              ;; preds set.
+              (values out substs
+                      (prune-successors analysis label (term-successors term))))
+             ((trivial-intset preds)
+              => (lambda (pred)
+                   (match (intmap-ref out pred)
+                     (($ $kargs names' vars' ($ $continue _ _ ($ $values vals)))
+                      ;; Substitute dominating definitions, and try to elide the
+                      ;; predecessor entirely.
+                      (let ((substs (fold (lambda (var val substs)
+                                            (intmap-add substs var val))
+                                          substs vars vals)))
+                        (match (elide-predecessor label pred out analysis)
+                          (#f
+                           ;; Can't elide; predecessor must be target of
+                           ;; backwards branch.
+                           (visit-term label names vars term out substs analysis))
+                          ((out . analysis)
+                           (visit-term label names' vars' term out substs analysis)))))
+                     (($ $kargs _ _ term)
+                      (match (compute-term-key term)
+                        (#f #f)
+                        (term-key
+                         (let ((fx (intmap-ref effects pred)))
+                           ;; Add residualized definition to the equivalence set.
+                           ;; Note that expressions that allocate a fresh object
+                           ;; or change the current fluid environment can't be
+                           ;; eliminated by CSE (though DCE might do it if the
+                           ;; value proves to be unused, in the allocation case).
+                           (when (and (not (causes-effect? fx &allocation))
+                                      (not (effect-clobbers? fx (&read-object &fluid))))
+                             (add-equivalent-expression! equivalent-expressions term-key pred vars)))
+                         ;; If the predecessor defines auxiliary definitions, as
+                         ;; `cons' does for the results of `car' and `cdr', define
+                         ;; those as well.
+                         (add-auxiliary-definitions! pred vars substs term-key)))
+                      (visit-term-normally))
+                     (_
+                      (visit-term-normally)))))
+             (else
+              (visit-term-normally)))))))
+      (_ (values (intmap-add! out label cont) substs analysis))))
+
+  ;; Because of the renumber pass, the labels are numbered in reverse
+  ;; post-order, so the intmap-fold will visit definitions before
+  ;; uses.
+  (let* ((effects (synthesize-definition-effects (compute-effects conts)))
+         (clobbers (compute-clobber-map effects))
+         (succs (compute-successors conts kfun))
+         (preds (invert-graph succs))
+         (avail (compute-available-expressions succs kfun clobbers))
+         (truthy-labels (compute-truthy-expressions conts kfun)))
+    (call-with-values
+        (lambda ()
+          (intmap-fold visit-label conts out substs
+                       (make-analysis effects clobbers preds avail truthy-labels)))
+      (lambda (out substs analysis)
+        (values out substs)))))
+
+(define (fold-renumbered-functions f conts . seeds)
+  ;; Precondition: CONTS has been renumbered, and therefore functions
+  ;; contained within it are topologically sorted, and the conts of each
+  ;; function's body are numbered sequentially after the function's
+  ;; $kfun.
+  (define (next-function-body kfun)
+    (match (intmap-ref conts kfun (lambda (_) #f))
+      (#f #f)
+      ((and cont ($ $kfun))
+       (let lp ((k (1+ kfun)) (body (intmap-add! empty-intmap kfun cont)))
+         (match (intmap-ref conts k (lambda (_) #f))
+           ((or #f ($ $kfun))
+            (persistent-intmap body))
+           (cont
+            (lp (1+ k) (intmap-add! body k cont))))))))
+
+  (let fold ((kfun 0) (seeds seeds))
+    (match (next-function-body kfun)
+      (#f (apply values seeds))
+      (conts
+       (call-with-values (lambda () (apply f kfun conts seeds))
+         (lambda seeds
+           (fold (1+ (intmap-prev conts)) seeds)))))))
 
 (define (eliminate-common-subexpressions conts)
-  (call-with-values (lambda () (compute-equivalent-subexpressions conts 0))
-    (lambda (equiv-labels var-substs)
-      (let ((truthy-labels (compute-truthy-expressions conts 0)))
-        (apply-cse conts equiv-labels var-substs truthy-labels)))))
+  (let ((conts (renumber conts 0)))
+    (persistent-intmap
+     (fold-renumbered-functions eliminate-common-subexpressions-in-fun
+                                conts empty-intmap empty-intmap))))
