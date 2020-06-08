@@ -24,9 +24,7 @@ License along with Guile.  If not, see
 
 AC_PREREQ(2.61)
 
-AC_INIT([GNU Guile],
-        m4_esyscmd([build-aux/git-version-gen --match v3.0.\* .tarball-version]),
-        [bug-guile@gnu.org])
+AC_INIT([GNU Guile], [3.0.2+dmbcs], [bug-guile@gnu.org])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_SRCDIR(GUILE-VERSION)
