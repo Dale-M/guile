@@ -1,6 +1,6 @@
 ;;; srfi-1.scm --- List Library
 
-;; 	Copyright (C) 2001, 2002, 2003, 2004, 2005, 2006, 2009, 2010, 2011, 2014 Free Software Foundation, Inc.
+;; 	Copyright (C) 2001, 2002, 2003, 2004, 2005, 2006, 2009, 2010, 2011, 2014, 2020 Free Software Foundation, Inc.
 ;;
 ;; This library is free software; you can redistribute it and/or
 ;; modify it under the terms of the GNU Lesser General Public
@@ -720,6 +720,28 @@ the list returned."
 
 ;;; Searching
 
+(define (find pred lst)
+  "Return the first element of @var{lst} that satisfies the predicate
+@var{pred}, or return @code{#f} if no such element is found."
+  (check-arg procedure? pred find)
+  (let loop ((lst lst))
+    (and (not (null? lst))
+         (let ((head (car lst)))
+           (if (pred head)
+               head
+               (loop (cdr lst)))))))
+
+(define (find-tail pred lst)
+  "Return the first pair of @var{lst} whose @sc{car} satisfies the
+predicate @var{pred}, or return @code{#f} if no such element is found."
+  (check-arg procedure? pred find)
+  (let loop ((lst lst))
+    (and (not (null? lst))
+         (let ((head (car lst)))
+           (if (pred head)
+               lst
+               (loop (cdr lst)))))))
+
 (define (take-while pred ls)
   "Return a new list which is the longest initial prefix of LS whose
 elements all satisfy the predicate PRED."
@@ -900,6 +922,23 @@ and those making the associations."
   (alist-delete key alist k=))	; XXX:optimize
 
 ;;; Delete / assoc / member
+
+(define* (assoc key alist #:optional (= equal?))
+  "Behaves like @code{assq} but uses third argument @var{pred} for key
+comparison.  If @var{pred} is not supplied, @code{equal?} is
+used.  (Extended from R5RS.)"
+  (cond
+   ((eq? = eq?) (assq key alist))
+   ((eq? = eqv?) (assv key alist))
+   (else
+    (check-arg procedure? = assoc)
+    (let loop ((alist alist))
+      (and (pair? alist)
+           (let ((item (car alist)))
+             (check-arg pair? item assoc)
+             (if (= key (car item))
+                 item
+                 (loop (cdr alist)))))))))
 
 (define* (member x ls #:optional (= equal?))
   (cond

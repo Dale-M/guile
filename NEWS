@@ -5,6 +5,15 @@ See the end for copying conditions.
 Please send Guile bug reports to bug-guile@gnu.org.
 
 
+Changes in 3.0.4 (since 3.0.3)
+
+This release fixes the SONAME of libguile-3.0.so, which was erroneously
+bumped in 3.0.3 compared to 3.0.2.  Distributions are strongly
+encouraged to use 3.0.4 instead of 3.0.3.
+
+Thanks to Chris Vine for reporting the issue.
+
+
 Changes in 3.0.3 (since 3.0.2)
 
 * New interfaces and functionality
@@ -45,6 +54,11 @@ the first Scheme compiler.  Because the baseline compiler runs faster
 and includes less code than the CPS compiler, Guile takes less time to
 build.
 
+** New 'pipeline' procedure in (ice-9 popen)
+
+The 'pipeline' procedure provides a simple way to spawn command pipeline
+as one would do in a shell.
+
 ** Refreshed bitvector facility
 
 See "Bit Vectors" in the manual, for more on all of these.
@@ -79,6 +93,35 @@ This replaces bit-invert!.
 *** New bitvector-set-bits!, bitvector-clear-bits! procedures
 
 These replace the wonky "bit-set*!" procedure.
+
+* Bug fixes
+
+** statprof reports the names of primitives
+
+Previously statprof would show strings like "anon #x1234" for primitives
+written in C.
+
+** Compiler reduces 'equal?' when passed a character literal
+
+The compiler now properly reduces expressions such as (equal? c #\x) to
+(eq? c #\x).  This was not the case in 3.0.2, which could lead to slower
+code, especially in 'match' expressions with many clauses with with
+character literals.
+
+** JIT bugs on ARMv7 have been fixed
+   (<https://bugs.gnu.org/40737>,
+    <https://gitlab.com/wingo/lightening/-/issues/12>)
+
+** 'http-get', 'http-post', etc. now honor #:verify-certificates?
+   (<https://bugs.gnu.org/40486>)
+
+** web: Accept URI host names consisting only of hex digits
+   (<https://bugs.gnu.org/40582>)
+
+** (web http) parser recognizes the CONNECT and PATCH methods
+
+** Initial revealed count of file ports is now zero
+   (<https://bugs.gnu.org/41204>)
 
 * New deprecations
 
