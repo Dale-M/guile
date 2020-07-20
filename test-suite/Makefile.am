@@ -74,7 +74,6 @@ SCM_TESTS = tests/00-initial-env.test		\
 	    tests/interp.test			\
 	    tests/keywords.test			\
 	    tests/list.test			\
-	    tests/load.test			\
 	    tests/match.test			\
 	    tests/match.test.upstream		\
 	    tests/modules.test			\
